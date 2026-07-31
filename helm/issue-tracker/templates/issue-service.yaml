@@ -1,0 +1,90 @@
+# ── PersistentVolumeClaim ──────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: issue-storage-pvc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.issueService.storage.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.issueService.storage.size | quote }}
+
+---
+# ── Deployment ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: issue-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: issue-service
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.issueService.replicas }}
+  selector:
+    matchLabels:
+      app: issue-service
+  template:
+    metadata:
+      labels:
+        app: issue-service
+    spec:
+      serviceAccountName: {{ include "issue-tracker.serviceAccountName" . }}
+      containers:
+        - name: issue-service
+          image: "{{ .Values.issueService.image.repository }}:{{ .Values.issueService.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.issueService.port }}
+          env:
+            - name: SPRING_DATASOURCE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: issue-service-config
+                  key: SPRING_DATASOURCE_URL
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: issue-service-secrets
+                  key: SPRING_DATASOURCE_USERNAME
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: issue-service-secrets
+                  key: SPRING_DATASOURCE_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: issue-service-secrets
+                  key: JWT_SECRET
+          volumeMounts:
+            - name: storage
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.issueService.resources | nindent 12 }}
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: issue-storage-pvc
+
+---
+# ── Service ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: issue-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: issue-service
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: issue-service
+  ports:
+    - port: 80
+      targetPort: {{ .Values.issueService.port }}

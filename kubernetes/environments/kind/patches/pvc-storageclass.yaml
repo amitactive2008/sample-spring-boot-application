@@ -1,7 +1,0 @@
-# Patch: replace AWS gp2 StorageClass with kind's built-in "standard"
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: issue-storage-pvc
-spec:
-  storageClassName: standard

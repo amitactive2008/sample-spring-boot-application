@@ -1,0 +1,151 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# values.yaml — defaults tuned for local kind development
+#
+# Override for prod:
+#   helm upgrade --install issue-tracker ./helm/issue-tracker \
+#     -f helm/issue-tracker/values-prod.yaml \
+#     --set jwt.secret="..." --set db.host="..." ...
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Global ────────────────────────────────────────────────────────────────────
+global:
+  namespace: issue-app
+  # "Never"        → kind: images are pre-loaded with `kind load docker-image`
+  # "IfNotPresent" → cloud: pull from registry only if not already cached
+  # "Always"       → always pull (CI/CD deploys where tag may change)
+  imagePullPolicy: Never
+
+# ── Shared JWT secret (HMAC-SHA256 — must be >= 32 characters) ───────────────
+# Used by api-gateway, auth-service, and issue-service.
+jwt:
+  secret: "local-kind-jwt-secret-key-32bytes!!"
+
+# ── Default admin user — seeded by DataSeeder on auth-service startup ────────
+admin:
+  email: "admin@example.com"
+  password: "Admin1234!"
+
+# ── Database credentials ──────────────────────────────────────────────────────
+db:
+  # Derived automatically from the in-cluster MySQL service name when
+  # mysql.enabled=true.  Set explicitly when mysql.enabled=false (e.g. RDS).
+  host: ""
+  port: 3306
+  name: "game_db"
+  username: "game_admin"
+  password: "devpassword123"
+
+# ── In-cluster MySQL ──────────────────────────────────────────────────────────
+# Set enabled=false in prod and point db.host at your RDS endpoint.
+mysql:
+  enabled: true
+  image: "mysql:8.0"
+  rootPassword: "rootpassword"
+  storage:
+    size: 1Gi
+    storageClass: standard    # kind built-in; use "gp2" on AWS EKS
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ── API Gateway (Spring Cloud Gateway / WebFlux, port 8096) ──────────────────
+apiGateway:
+  image:
+    repository: api-gateway
+    tag: local
+  replicas: 1
+  port: 8096
+  cors:
+    # All traffic enters via nginx on :8080 (same origin), so CORS is not
+    # strictly triggered.  Set to the real frontend origin in prod.
+    allowedOrigin: "http://localhost:8080"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ── Auth Service (Spring Boot 4, port 8097) ───────────────────────────────────
+authService:
+  image:
+    repository: auth-service
+    tag: local
+  replicas: 1
+  port: 8097
+  mail:
+    enabled: false          # set true in prod with real SES credentials
+    sesUsername: "disabled" # placeholder; prevents Spring Boot placeholder error
+    sesPassword: "disabled"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ── Issue Service (Spring Boot 4, port 8098) ──────────────────────────────────
+issueService:
+  image:
+    repository: issue-service
+    tag: local
+  replicas: 1
+  port: 8098
+  storage:
+    size: 1Gi
+    storageClass: standard    # use "gp2" on AWS EKS
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ── Frontend Service (React 19 dev server, port 3000) ─────────────────────────
+frontendService:
+  image:
+    repository: frontend-service
+    tag: local
+  replicas: 1
+  port: 3000
+  # "/api" is a relative path — the React app (served at http://localhost:8080)
+  # will make XHR calls to http://localhost:8080/api/...
+  # The nginx ingress strips the /api prefix before forwarding to the gateway.
+  apiBaseUrl: "/api"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx          # use "alb" on AWS EKS
+  host: ""                  # empty = match all hosts (good for local dev)
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Capture group $2 strips the /api prefix before forwarding to the gateway.
+    # The gateway then matches /auth/** and /issues/** as expected.
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+  paths:
+    api: "/api(/|$)(.*)"
+    apiPathType: ImplementationSpecific
+    frontend: "/"
+    frontendPathType: Prefix
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+serviceAccount:
+  name: issue-app-sa
+  # Add IRSA annotation for prod:
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<role>
+  annotations: {}

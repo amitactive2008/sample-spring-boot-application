@@ -1,0 +1,88 @@
+# values-prod.yaml — production overrides
+#
+# Sensitive values (passwords, secrets) must be passed at deploy time.
+# Never commit real credentials to source control.
+#
+# Usage:
+#   helm upgrade --install issue-tracker ./helm/issue-tracker \
+#     --namespace issue-app --create-namespace \
+#     -f helm/issue-tracker/values-prod.yaml \
+#     --set jwt.secret="$JWT_SECRET" \
+#     --set db.host="$RDS_ENDPOINT" \
+#     --set db.username="$DB_USERNAME" \
+#     --set db.password="$DB_PASSWORD" \
+#     --set admin.email="$ADMIN_EMAIL" \
+#     --set admin.password="$ADMIN_PASSWORD" \
+#     --set authService.mail.sesUsername="$SES_USERNAME" \
+#     --set authService.mail.sesPassword="$SES_PASSWORD" \
+#     --set apiGateway.image.tag="$GIT_SHA" \
+#     --set authService.image.tag="$GIT_SHA" \
+#     --set issueService.image.tag="$GIT_SHA" \
+#     --set frontendService.image.tag="$GIT_SHA"
+
+global:
+  imagePullPolicy: IfNotPresent
+
+# ── Disable in-cluster MySQL; use AWS RDS ────────────────────────────────────
+mysql:
+  enabled: false
+
+db:
+  host: ""      # set via --set db.host="<rds-endpoint>"
+  port: 3306
+  name: "game_db"
+  username: ""  # set via --set db.username
+  password: ""  # set via --set db.password
+
+# ── ECR image repositories ────────────────────────────────────────────────────
+apiGateway:
+  image:
+    repository: "530352103493.dkr.ecr.us-east-1.amazonaws.com/prod-api-gateway"
+    tag: latest   # overridden by CI/CD with the Git SHA
+  cors:
+    allowedOrigin: "https://tcmslk.me"
+
+authService:
+  image:
+    repository: "530352103493.dkr.ecr.us-east-1.amazonaws.com/prod-auth-service"
+    tag: latest
+  mail:
+    enabled: true
+    sesUsername: ""   # set via --set authService.mail.sesUsername
+    sesPassword: ""   # set via --set authService.mail.sesPassword
+
+issueService:
+  image:
+    repository: "530352103493.dkr.ecr.us-east-1.amazonaws.com/prod-issue-service"
+    tag: latest
+  storage:
+    storageClass: gp2   # AWS EBS StorageClass
+
+frontendService:
+  image:
+    repository: "530352103493.dkr.ecr.us-east-1.amazonaws.com/prod-frontend-service"
+    tag: latest
+  apiBaseUrl: "/api"
+
+# ── AWS ALB Ingress ───────────────────────────────────────────────────────────
+# NOTE: In prod the /api prefix stripping happens at the CloudFront layer.
+# The ALB Ingress forwards /api/* to the gateway without rewriting.
+# If you remove CloudFront you must add a rewrite annotation or use nginx.
+ingress:
+  className: alb
+  host: "tcmslk.me"
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+  paths:
+    api: "/api"
+    apiPathType: Prefix
+    frontend: "/"
+    frontendPathType: Prefix
+
+# ── IRSA ServiceAccount ───────────────────────────────────────────────────────
+serviceAccount:
+  name: issue-app-sa
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::530352103493:role/prod-issue-app-secrets-role"

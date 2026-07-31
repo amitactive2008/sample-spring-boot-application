@@ -1,0 +1,51 @@
+# ── Deployment ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: frontend-service
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontendService.replicas }}
+  selector:
+    matchLabels:
+      app: frontend-service
+  template:
+    metadata:
+      labels:
+        app: frontend-service
+    spec:
+      serviceAccountName: {{ include "issue-tracker.serviceAccountName" . }}
+      containers:
+        - name: frontend-service
+          image: "{{ .Values.frontendService.image.repository }}:{{ .Values.frontendService.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.frontendService.port }}
+          env:
+            # react-scripts start (dev server) reads REACT_APP_* at startup,
+            # so this runtime env var takes effect even though the Dockerfile
+            # also sets it at build time via ARG.
+            - name: REACT_APP_API_BASE_URL
+              value: {{ .Values.frontendService.apiBaseUrl | quote }}
+          resources:
+            {{- toYaml .Values.frontendService.resources | nindent 12 }}
+
+---
+# ── Service ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: frontend-service
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: frontend-service
+  ports:
+    - port: 80
+      targetPort: {{ .Values.frontendService.port }}

@@ -1,0 +1,95 @@
+{{- if .Values.mysql.enabled }}
+# ── PersistentVolumeClaim ──────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: {{ .Release.Name }}-mysql
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.mysql.storage.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.mysql.storage.size | quote }}
+
+---
+# ── Deployment ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-mysql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: {{ .Release.Name }}-mysql
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # Recreate is required for ReadWriteOnce PVCs — only one pod can mount at a time
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-mysql
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-mysql
+    spec:
+      containers:
+        - name: mysql
+          image: {{ .Values.mysql.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: {{ .Values.mysql.rootPassword | quote }}
+            - name: MYSQL_DATABASE
+              value: {{ .Values.db.name | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.db.username | quote }}
+            - name: MYSQL_PASSWORD
+              value: {{ .Values.db.password | quote }}
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - "mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD}"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.mysql.resources | nindent 12 }}
+      volumes:
+        - name: mysql-storage
+          persistentVolumeClaim:
+            claimName: mysql-pvc
+
+---
+# ── Service ────────────────────────────────────────────────────────────────────
+# Name matches the value returned by the `issue-tracker.mysqlHost` helper
+# so JDBC URLs are resolved automatically via Kubernetes DNS.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-mysql
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: {{ .Release.Name }}-mysql
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+{{- end }}

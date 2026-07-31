@@ -1,38 +1,45 @@
-Prerequisites
-brew install kind kubectl
-# Docker Desktop must be running
-One-command deploy
-./scripts/kind-deploy.sh
-The script does everything automatically. Once done, open http://localhost:8080.
-Default admin: admin@example.com / Admin1234!
 What was created
-kubernetes/environments/kind/
-├── kind-cluster.yaml          # kind cluster config (port 8080→80)
-├── kustomization.yaml         # overlay — selectively pulls from base
-├── secrets.yaml               # plain Secrets (replaces ESO + AWS Secrets Manager)
-├── ingress.yaml               # nginx ingress with /api prefix-strip
-├── mysql/
-│   ├── deployment.yaml        # MySQL 8.0 in-cluster (replaces AWS RDS)
-│   ├── service.yaml
-│   └── pvc.yaml               # standard StorageClass (kind built-in)
-└── patches/
-    ├── configmap-auth.yaml    # DB URL → mysql:3306; MAIL_ENABLED=false
-    ├── configmap-issue.yaml   # DB URL → mysql:3306
-    ├── pvc-storageclass.yaml  # gp2 → standard
-    ├── deployment-api-gateway.yaml    # CORS origin + imagePullPolicy: Never
-    ├── deployment-auth-service.yaml   # admin seed creds + imagePullPolicy: Never
-    ├── deployment-issue-service.yaml  # imagePullPolicy: Never
-    └── deployment-frontend-service.yaml # imagePullPolicy: Never
+helm/issue-tracker/
+├── Chart.yaml                     # chart metadata
+├── .helmignore
+├── values.yaml                    # kind defaults (ready to use)
+├── values-prod.yaml               # prod overrides (ECR images, RDS, ALB)
+└── templates/
+    ├── _helpers.tpl               # reusable snippets (labels, jdbcUrl, mysqlHost, ingressPaths)
+    ├── namespace.yaml
+    ├── serviceaccount.yaml
+    ├── secrets.yaml               # api-gateway-secrets, auth-service-secrets, issue-service-secrets
+    ├── configmaps.yaml            # auth-service-config, issue-service-config
+    ├── ingress.yaml               # nginx (kind) or ALB (prod) — controlled by values
+    ├── mysql.yaml                 # Deployment + Service + PVC (skipped when mysql.enabled=false)
+    ├── api-gateway.yaml
+    ├── auth-service.yaml          # includes APP_ADMIN_EMAIL/PASSWORD fix
+    ├── issue-service.yaml         # includes PVC mount
+    └── frontend-service.yaml
 
-scripts/kind-deploy.sh         # automation script
-What each piece solves
-Problem
-No AWS ECR
-No AWS RDS
-No External Secrets Operator
-AWS ALB Ingress won't work
-gp2 StorageClass (AWS-only)
-APP_ADMIN_EMAIL/PASSWORD missing from base Deployment
-Images pulled from registry
-Tear down
-./scripts/kind-deploy.sh teardown
+scripts/helm-deploy.sh             # automation script
+One-command deploy to kind
+brew install kind kubectl helm
+./scripts/helm-deploy.sh
+App at http://localhost:8080 | Admin: admin@example.com / Admin1234!
+Key script subcommands
+./scripts/helm-deploy.sh            # full: create cluster + build + install
+./scripts/helm-deploy.sh upgrade    # rebuild images + helm upgrade only
+./scripts/helm-deploy.sh lint       # dry-run without touching the cluster
+./scripts/helm-deploy.sh teardown   # delete the kind cluster
+
+
+Prod deploy (once Terraform has provisioned infra)
+helm upgrade --install issue-tracker helm/issue-tracker \
+  --namespace issue-app --create-namespace \
+  -f helm/issue-tracker/values-prod.yaml \
+  --set jwt.secret="$JWT_SECRET" \
+  --set db.host="$RDS_ENDPOINT" \
+  --set db.username="$DB_USERNAME" \
+  --set db.password="$DB_PASSWORD" \
+  --set admin.email="$ADMIN_EMAIL" \
+  --set admin.password="$ADMIN_PASSWORD" \
+  --set apiGateway.image.tag="$GIT_SHA" \
+  --set authService.image.tag="$GIT_SHA" \
+  --set issueService.image.tag="$GIT_SHA" \
+  --set frontendService.image.tag="$GIT_SHA"
