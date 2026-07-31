@@ -1,46 +1,38 @@
 Prerequisites
-Install these on your laptop:
-Tool	Version	Install
-Docker Desktop	Latest	https://docs.docker.com/desktop (https://docs.docker.com/desktop)
-Docker Compose	v2 (bundled with Docker Desktop)	—
-That's it. Java, Maven, and Node are not needed — they run inside the containers.
-Steps
-1. Copy the env file
-cp .env.example .env
-Edit .env if you want to change passwords. The defaults work fine locally.
-2. Build and start all services
-docker-compose up --build
-First run takes ~5–10 minutes (Maven downloads dependencies, Node installs packages). Subsequent starts are fast.
-3. Open the app
-URL	What
-http://localhost:3000	React frontend
-http://localhost:8096	API Gateway (direct)
-http://localhost:8097	Auth service (direct)
-http://localhost:8098	Issue service (direct)
-4. Log in
-Use the seeded admin account:
-- Email: admin@example.com
-- Password: Admin1234!
-(These come from APP_ADMIN_EMAIL / APP_ADMIN_PASSWORD in .env)
-Useful commands
-# Stop everything
-docker-compose down
+brew install kind kubectl
+# Docker Desktop must be running
+One-command deploy
+./scripts/kind-deploy.sh
+The script does everything automatically. Once done, open http://localhost:8080.
+Default admin: admin@example.com / Admin1234!
+What was created
+kubernetes/environments/kind/
+├── kind-cluster.yaml          # kind cluster config (port 8080→80)
+├── kustomization.yaml         # overlay — selectively pulls from base
+├── secrets.yaml               # plain Secrets (replaces ESO + AWS Secrets Manager)
+├── ingress.yaml               # nginx ingress with /api prefix-strip
+├── mysql/
+│   ├── deployment.yaml        # MySQL 8.0 in-cluster (replaces AWS RDS)
+│   ├── service.yaml
+│   └── pvc.yaml               # standard StorageClass (kind built-in)
+└── patches/
+    ├── configmap-auth.yaml    # DB URL → mysql:3306; MAIL_ENABLED=false
+    ├── configmap-issue.yaml   # DB URL → mysql:3306
+    ├── pvc-storageclass.yaml  # gp2 → standard
+    ├── deployment-api-gateway.yaml    # CORS origin + imagePullPolicy: Never
+    ├── deployment-auth-service.yaml   # admin seed creds + imagePullPolicy: Never
+    ├── deployment-issue-service.yaml  # imagePullPolicy: Never
+    └── deployment-frontend-service.yaml # imagePullPolicy: Never
 
-# Stop and wipe the database volume (fresh start)
-docker-compose down -v
-
-# View logs for one service
-docker-compose logs -f auth-service
-
-# Restart a single service after a code change
-docker-compose up --build auth-service
-How it wires together locally
-Browser
-  └── http://localhost:3000   (frontend dev server)
-        └── axios calls → http://localhost:8096  (api-gateway)
-              ├── /auth/**  → auth-service:8097  (Docker internal DNS)
-              └── /issues/** → issue-service:8098
-                    └── Both read from MySQL:3306 (Docker internal)
-The JWT secret is shared across all three Java services via the JWT_SECRET env var in .env.
-Known limitation
-Email (AWS SES) is disabled locally (MAIL_ENABLED=false). Welcome emails on registration are silently skipped — this is intentional since SES credentials are not needed for local dev.
+scripts/kind-deploy.sh         # automation script
+What each piece solves
+Problem
+No AWS ECR
+No AWS RDS
+No External Secrets Operator
+AWS ALB Ingress won't work
+gp2 StorageClass (AWS-only)
+APP_ADMIN_EMAIL/PASSWORD missing from base Deployment
+Images pulled from registry
+Tear down
+./scripts/kind-deploy.sh teardown

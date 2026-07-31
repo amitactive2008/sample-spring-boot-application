@@ -1,0 +1,63 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: issue-app
+
+# Selectively pull from base — deliberately excludes:
+#   - infrastructure/secret-store.yaml   (requires ESO + AWS Secrets Manager)
+#   - infrastructure/ingress.yaml        (ALB-specific; replaced below)
+#   - services/*/external-secret.yaml   (requires ESO; replaced by secrets.yaml below)
+resources:
+  # ── Core infrastructure ──────────────────────────────────────
+  - ../../base/infrastructure/namespace.yaml
+  - ../../base/infrastructure/serviceaccount.yaml  # IRSA annotation is harmless in kind
+
+  # ── Service workloads ────────────────────────────────────────
+  - ../../base/services/api-gateway/deployment.yaml
+  - ../../base/services/api-gateway/service.yaml
+  - ../../base/services/auth-service/deployment.yaml
+  - ../../base/services/auth-service/service.yaml
+  - ../../base/services/auth-service/configmap.yaml
+  - ../../base/services/issue-service/deployment.yaml
+  - ../../base/services/issue-service/service.yaml
+  - ../../base/services/issue-service/configmap.yaml
+  - ../../base/services/issue-service/pvc.yaml
+  - ../../base/services/frontend-service/deployment.yaml
+  - ../../base/services/frontend-service/service.yaml
+
+  # ── kind-specific additions ──────────────────────────────────
+  - mysql/deployment.yaml          # in-cluster MySQL (replaces AWS RDS)
+  - mysql/service.yaml
+  - mysql/pvc.yaml
+  - secrets.yaml                   # plain Secrets (replaces ExternalSecrets)
+  - ingress.yaml                   # nginx ingress (replaces ALB ingress)
+
+# ── Image overrides (local builds loaded via `kind load docker-image`) ──
+images:
+  - name: api-gateway
+    newName: api-gateway
+    newTag: local
+  - name: auth-service
+    newName: auth-service
+    newTag: local
+  - name: issue-service
+    newName: issue-service
+    newTag: local
+  - name: frontend-service
+    newName: frontend-service
+    newTag: local
+
+# ── Patches ──────────────────────────────────────────────────────
+patches:
+  # ConfigMaps: swap RDS URL → in-cluster mysql:3306; disable mail
+  - path: patches/configmap-auth.yaml
+  - path: patches/configmap-issue.yaml
+
+  # PVC: swap AWS gp2 StorageClass → kind built-in "standard"
+  - path: patches/pvc-storageclass.yaml
+
+  # Deployments: CORS origin, admin seed credentials, imagePullPolicy
+  - path: patches/deployment-api-gateway.yaml
+  - path: patches/deployment-auth-service.yaml
+  - path: patches/deployment-issue-service.yaml
+  - path: patches/deployment-frontend-service.yaml

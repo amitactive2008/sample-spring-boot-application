@@ -1,0 +1,23 @@
+# kind cluster configuration for local development
+# Creates a single-node cluster with nginx ingress port mappings.
+#
+# Port mapping: host:8080 -> container:80 (nginx ingress)
+# Using 8080 avoids requiring root/admin for binding to port 80.
+#
+# Usage:
+#   kind create cluster --name issue-app --config kind-cluster.yaml
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
