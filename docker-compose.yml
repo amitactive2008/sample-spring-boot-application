@@ -1,0 +1,116 @@
+version: '3.8'
+
+# ──────────────────────────────────────────────────────────────
+#  Local development stack
+#  Copy .env.example → .env and adjust values before running.
+#  Usage:
+#    docker-compose up --build          # foreground
+#    docker-compose up --build -d       # detached
+#    docker-compose down -v             # stop + remove volumes
+# ──────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MySQL 8.0 ────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: issue-app-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-game_db}
+      MYSQL_USER: ${MYSQL_USER:-game_admin}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-devpassword123}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root",
+             "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ── Auth Service (Spring Boot 4 / port 8097) ──────────────────
+  auth-service:
+    build:
+      context: ./auth-service
+    container_name: issue-app-auth
+    ports:
+      - "8097:8097"
+    environment:
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}
+        ?createDatabaseIfNotExist=true
+        &useSSL=false
+        &allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-game_admin}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-devpassword123}
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-key-32bytes!!}
+      APP_ADMIN_EMAIL: ${APP_ADMIN_EMAIL:-admin@example.com}
+      APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-Admin1234!}
+      # Mail is disabled locally; dummy SES vars prevent Spring Boot
+      # from failing to resolve the placeholders in application-prod.properties
+      MAIL_ENABLED: "false"
+      SES_USERNAME: "disabled"
+      SES_PASSWORD: "disabled"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Issue Service (Spring Boot 4 / port 8098) ─────────────────
+  issue-service:
+    build:
+      context: ./issue-service
+    container_name: issue-app-issues
+    ports:
+      - "8098:8098"
+    environment:
+      SPRING_DATASOURCE_URL: >-
+        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}
+        ?createDatabaseIfNotExist=true
+        &useSSL=false
+        &allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-game_admin}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-devpassword123}
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-key-32bytes!!}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── API Gateway (Spring Cloud Gateway / port 8096) ────────────
+  api-gateway:
+    build:
+      context: ./api-gateway
+    container_name: issue-app-gateway
+    ports:
+      - "8096:8096"
+    environment:
+      # "prod" profile routes to Docker service names (auth-service, issue-service)
+      SPRING_PROFILES_ACTIVE: prod
+      JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-key-32bytes!!}
+      CORS_ALLOWED_ORIGIN: http://localhost:3000
+    depends_on:
+      - auth-service
+      - issue-service
+    restart: on-failure
+
+  # ── Frontend Service (React 19 dev server / port 3000) ────────
+  frontend-service:
+    build:
+      context: ./frontend-service
+    container_name: issue-app-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # react-scripts start reads this at runtime (dev mode),
+      # so the browser will call http://localhost:8096 directly.
+      REACT_APP_API_BASE_URL: http://localhost:8096
+    depends_on:
+      - api-gateway
+
+volumes:
+  mysql_data:
