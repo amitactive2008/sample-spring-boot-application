@@ -40,16 +40,8 @@ public class AuthService {
         String hashedPassword = passwordEncoder.encode(dto.getPassword());
         user.setPasswordHash(hashedPassword);
 
-        // Set role (String → Enum with fallback - can't be done by ModelMapper)
-        Role role = Role.USER;
-        if (dto.getRole() != null && !dto.getRole().isBlank()) {
-            try {
-                role = Role.valueOf(dto.getRole().toUpperCase());
-            } catch (IllegalArgumentException e) {
-                role = Role.USER;
-            }
-        }
-        user.setRole(role);
+        // Set role - always USER for self-registration; admins are seeded or assigned by existing admins
+        user.setRole(Role.USER);
 
         // Save to database
         userRepository.save(user);

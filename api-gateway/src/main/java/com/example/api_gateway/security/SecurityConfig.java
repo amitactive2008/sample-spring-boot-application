@@ -50,7 +50,7 @@ public class SecurityConfig {
                 .pathMatchers(HttpMethod.POST, "/issues/**").hasAnyRole("USER", "ADMIN")
                 .pathMatchers(HttpMethod.PUT, "/issues/**").hasAnyRole("USER", "ADMIN")
                 .pathMatchers(HttpMethod.PATCH, "/issues/**").hasAnyRole("USER", "ADMIN")
-                .pathMatchers(HttpMethod.DELETE, "/issues/**").hasAnyRole("USER", "ADMIN")
+                .pathMatchers(HttpMethod.DELETE, "/issues/**").hasRole("ADMIN")
                 .anyExchange().authenticated()
         );
         http.oauth2ResourceServer(oauth2 -> oauth2
@@ -62,7 +62,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of(allowedOrigin));
+        config.setAllowedOriginPatterns(List.of(allowedOrigin));
         config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);

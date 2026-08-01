@@ -23,6 +23,7 @@ and `/api` prefix stripping, all declaratively configured.
 11. [Day-2 Operations](#11-day-2-operations)
 12. [Tear Down](#12-tear-down)
 13. [Security & Code Quality Pipeline](#13-security--code-quality-pipeline)
+14. [Automated Pipeline Script](#14-automated-pipeline-script--security-pipelinesh)
 
 ---
 
@@ -1369,3 +1370,70 @@ jobs:
 | `NVD_API_KEY` | Free from https://nvd.nist.gov/developers/request-an-api-key |
 | `SONAR_HOST` | SonarQube server URL |
 | `SONAR_TOKEN` | SonarQube analysis token |
+
+---
+
+## 14. Automated Pipeline Script — `security-pipeline.sh`
+
+`security-pipeline.sh` at the repository root runs the full security and code
+quality pipeline (Gitleaks, Checkstyle, Semgrep, Maven Build, NVD Check, Lint,
+SonarQube, Quality Gate, DAST) with a single command.
+
+In the v4 context it runs on the **developer's workstation or a CI agent** —
+not inside the Kind cluster. It validates source code and container images
+before `helm upgrade --install` pushes them into the cluster.
+
+### 14.1 Usage
+
+```bash
+chmod +x security-pipeline.sh
+
+# Full pipeline (installs missing tools automatically)
+./security-pipeline.sh
+
+# Skip Docker-dependent steps (no Docker install needed)
+./security-pipeline.sh --skip-sonar --skip-dast
+
+# With NVD API key (avoids slow first-run database download)
+./security-pipeline.sh --nvd-key xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# DAST against the running Kind cluster (after helm deploy)
+./security-pipeline.sh --skip-sonar --app-url http://localhost:8080
+```
+
+### 14.2 Where it fits in the v4 workflow
+
+```
+1. ./security-pipeline.sh --skip-dast      ← run before building images
+2. docker build / kind load docker-image
+3. helm upgrade --install issue-tracker ./helm/issue-tracker -f values.yaml
+4. ./security-pipeline.sh --skip-sonar     ← DAST against the live cluster
+   --app-url http://localhost:8080
+```
+
+### 14.3 Options
+
+| Option | Description |
+|---|---|
+| `--skip-sonar` | Skip SonarQube + Quality Gate (no Docker needed) |
+| `--skip-dast` | Skip ZAP scan (use before cluster is deployed) |
+| `--nvd-key KEY` | NVD API key for faster dependency scanning |
+| `--app-url URL` | Target URL for DAST (default: `http://localhost`, use `http://localhost:8080` for Kind) |
+| `--repo DIR` | Repository root (default: `/opt/issue-tracker`, override if cloned elsewhere) |
+| `--skip-install` | Abort instead of auto-installing a missing tool |
+
+### 14.4 Reports
+
+Every run writes a timestamped report directory:
+
+```
+/tmp/pipeline-reports/<timestamp>/
+├── pipeline.log          ← combined log
+├── gitleaks.json         ← secret scan findings
+├── semgrep-java.json     ← Java SAST findings
+├── semgrep-js.json       ← React SAST findings
+├── nvd.log               ← CVE scan (HTML reports in */target/)
+├── sonar-token.txt       ← SonarQube token
+├── zap-report.html       ← ZAP report (open in browser)
+└── zap-report.json
+```
