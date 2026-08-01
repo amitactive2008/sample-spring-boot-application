@@ -29,6 +29,15 @@ one Linux host (bare metal, VM, or Multipass instance).
     - [12.7 SonarQube](#127-sonarqube--code-quality--security-analysis)
     - [12.8 Quality Gate](#128-quality-gate--mergedeploy-gate)
     - [12.9 NVD Check](#129-nvd-check--dependency-vulnerability-scanning)
+13. [Automated Pipeline Script](#13-automated-pipeline-script--security-pipelinesh)
+    - [13.1 What it does](#131-what-it-does)
+    - [13.2 Prerequisites](#132-prerequisites)
+    - [13.3 Getting the script onto the VM](#133-getting-the-script-onto-the-vm)
+    - [13.4 Usage](#134-usage)
+    - [13.5 SonarQube setup](#135-sonarqube-setup-steps-127--128)
+    - [13.6 DAST setup](#136-dast-setup-step-125)
+    - [13.7 Reports](#137-reports)
+    - [13.8 Terminal output](#138-terminal-output)
 
 ---
 
@@ -2010,3 +2019,220 @@ upgrade to.
 | 7 | **SonarQube** | CI — analysis | All services + frontend | Yes |
 | 8 | **Quality Gate** | CI — gate | SonarQube metrics threshold | Yes |
 | 9 | **NVD Check (SCA)** | CI — after build | Third-party JARs + npm packages | Yes (CVSS ≥ 7) |
+
+---
+
+## 13. Automated Pipeline Script — `security-pipeline.sh`
+
+`security-pipeline.sh` runs all nine checks from Section 12 in the correct order
+with a single command. It is designed to run directly on the Multipass VM
+(`issue-tracker-v1`) or any Linux host where the repository is deployed.
+
+### 13.1 What it does
+
+The script orchestrates the full pipeline end-to-end:
+
+```
+ 12.1  Gitleaks     →  12.2  Checkstyle  →  12.3  Semgrep
+                                                      ↓
+ 12.9  NVD Check   ←  12.4  Maven Build (required by NVD, Lint, Sonar)
+       ↓
+ 12.6  Lint (ESLint + SpotBugs)
+       ↓
+ 12.7  SonarQube  →  12.8  Quality Gate
+                                ↓
+                           [merge / deploy to staging]
+                                ↓
+                        12.5  DAST (ZAP)
+```
+
+Steps that depend on compiled artifacts (NVD Check, Lint, SonarQube, Quality Gate)
+are automatically skipped if the Maven Build step fails, rather than producing
+misleading results.
+
+### 13.2 Prerequisites
+
+The script installs every missing tool automatically using `apt` and package
+manager downloads. No manual setup is required beyond having the repository
+present on the host.
+
+| Tool | Installed by script if missing |
+|---|---|
+| Java 21 | `apt install openjdk-21-jdk` — required for Spring Boot 4.0.1 services (VM ships with Java 17) |
+| Docker | `get.docker.com` installer — required for SonarQube and ZAP |
+| Gitleaks | Binary downloaded from GitHub Releases |
+| Semgrep | `pip3 install semgrep` |
+| jq | `apt install jq` |
+| Node.js 18 / npm | NodeSource setup script — required for ESLint |
+
+> **NVD API key** — not installed automatically but strongly recommended.
+> Without it, the first dependency scan downloads the full NVD database which
+> can take 10–30 minutes. Get a free key at
+> https://nvd.nist.gov/developers/request-an-api-key
+
+### 13.3 Getting the script onto the VM
+
+The script lives at the repository root as `security-pipeline.sh`.
+After cloning or pulling the latest code on the VM it is already present:
+
+```bash
+multipass shell issue-tracker-v1
+chmod +x /opt/issue-tracker/security-pipeline.sh
+```
+
+To copy it manually from the host machine:
+
+```bash
+multipass transfer security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
+multipass exec issue-tracker-v1 -- chmod +x /opt/issue-tracker/security-pipeline.sh
+```
+
+### 13.4 Usage
+
+```
+./security-pipeline.sh [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| _(no options)_ | Full pipeline — installs missing tools, runs all 9 steps |
+| `--skip-sonar` | Skip SonarQube (12.7) and Quality Gate (12.8) — no Docker needed |
+| `--skip-dast` | Skip ZAP scan (12.5) — use when the app is not running |
+| `--skip-install` | Abort instead of auto-installing a missing tool |
+| `--nvd-key KEY` | NVD API key for faster dependency scanning |
+| `--app-url URL` | Base URL for the DAST scan (default: `http://localhost`) |
+| `--repo DIR` | Repository root directory (default: `/opt/issue-tracker`) |
+
+Environment variables accepted as alternatives to flags:
+
+| Variable | Equivalent flag |
+|---|---|
+| `NVD_API_KEY` | `--nvd-key` |
+| `APP_URL` | `--app-url` |
+| `REPO_DIR` | `--repo` |
+| `SONAR_TOKEN` | Pre-existing SonarQube token (skips auto token generation) |
+
+**Examples:**
+
+```bash
+# Full pipeline (installs any missing tools automatically)
+./security-pipeline.sh
+
+# Fastest run — skip the two Docker-dependent steps
+./security-pipeline.sh --skip-sonar --skip-dast
+
+# With NVD API key (avoids the slow initial database download)
+./security-pipeline.sh --nvd-key xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# Full pipeline with NVD key, skipping DAST (app not yet running)
+./security-pipeline.sh --nvd-key $NVD_API_KEY --skip-dast
+
+# DAST only — after deploying to staging
+APP_URL=http://192.168.64.10 ./security-pipeline.sh \
+  --skip-sonar --nvd-key $NVD_API_KEY
+
+# Non-interactive CI mode — fail immediately if any tool is missing
+./security-pipeline.sh --skip-install --skip-dast
+```
+
+### 13.5 SonarQube setup (steps 12.7 & 12.8)
+
+The script handles SonarQube setup automatically:
+
+1. Starts a `sonarqube:community` Docker container on port `9000` (memory-limited to 2 GB).
+2. Waits up to 5 minutes for the server to become ready.
+3. Changes the default `admin` password to `PipelineAdmin@1234` (idempotent).
+4. Creates one project per service (`issue-tracker-auth-service`, etc.).
+5. Generates a `GLOBAL_ANALYSIS_TOKEN` and runs `mvn sonar:sonar` for each service.
+6. Polls the Quality Gate API until the background analysis task completes, then
+   prints the result and any failed conditions inline.
+
+The SonarQube UI remains accessible after the script finishes:
+
+```
+URL   : http://localhost:9000   (or http://<VM-IP>:9000)
+Login : admin
+Pass  : PipelineAdmin@1234
+```
+
+> The container is started with `--restart unless-stopped` so it survives VM
+> reboots. Stop it manually with `sudo docker stop sonarqube` when not needed.
+
+### 13.6 DAST setup (step 12.5)
+
+The DAST step requires:
+
+1. **Docker** — the script installs it if absent.
+2. **A running application** — Nginx must be serving the app on `APP_URL`
+   (default `http://localhost`). The script checks reachability before launching
+   ZAP and prints instructions if the app is not accessible.
+
+The scan uses `zap-baseline.py` (passive mode — it observes traffic without
+sending attack payloads). It flags missing security headers, CORS
+misconfigurations, and other observable issues without touching production data.
+
+```bash
+# Start services if stopped, then run DAST
+sudo systemctl start auth-service issue-service api-gateway nginx
+./security-pipeline.sh --skip-sonar
+```
+
+### 13.7 Reports
+
+Every run creates a timestamped directory under `/tmp/pipeline-reports/`:
+
+```
+/tmp/pipeline-reports/20260801-143022/
+├── pipeline.log            ← combined log of all steps
+├── .gitleaks.toml          ← allowlist used during the scan
+├── gitleaks.log
+├── gitleaks.json           ← machine-readable findings (empty = no secrets)
+├── checkstyle.log
+├── semgrep-java.json       ← Java SAST findings
+├── semgrep-js.json         ← React/JS SAST findings
+├── build.log
+├── nvd.log
+│   (per-service HTML/JSON reports also written to */target/)
+├── lint.log
+├── sonar.log
+├── sonar-token.txt         ← SonarQube token (used by Quality Gate step)
+├── gate.log
+├── zap-report.html         ← Open in browser for the full ZAP report
+└── zap-report.json
+```
+
+OWASP Dependency-Check HTML reports (one per service) are written alongside the
+compiled JARs:
+
+```
+auth-service/target/dependency-check-report.html
+issue-service/target/dependency-check-report.html
+api-gateway/target/dependency-check-report.html
+```
+
+### 13.8 Terminal output
+
+The script prints colour-coded progress and ends with a summary table:
+
+```
+╔════════════════════════════════════════════════════════════╗
+║       SECURITY & CODE QUALITY PIPELINE — SUMMARY           ║
+╠════════════════════════════════════════════════════════════╣
+║  ✔  12.1  Gitleaks          Secret Scanning          2s  ║
+║  ✔  12.2  Checkstyle        Java Code Style         12s  ║
+║  ✔  12.3  Semgrep           SAST                    38s  ║
+║  ✔  12.4  Maven Build       Compile & Package      145s  ║
+║  ✔  12.9  NVD Check         Dependency CVEs        240s  ║
+║  ✔  12.6  Lint              ESLint + SpotBugs       28s  ║
+║  ✔  12.7  SonarQube         Quality Analysis        65s  ║
+║  ✔  12.8  Quality Gate      Merge/Deploy Gate        8s  ║
+║  ✔  12.5  DAST              ZAP Dynamic Scan        95s  ║
+╠════════════════════════════════════════════════════════════╣
+║  ALL CHECKS PASSED — safe to merge and deploy              ║
+║  Pass: 9  Fail: 0  Skip: 0  Total: 633s                   ║
+║  Reports: /tmp/pipeline-reports/20260801-143022            ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+When checks fail, the table highlights the failed steps in red and prints the
+path to each step's log file for immediate investigation.
