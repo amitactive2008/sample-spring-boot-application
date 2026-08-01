@@ -40,13 +40,13 @@ services:
     ports:
       - "8097:8097"
     environment:
-      SPRING_DATASOURCE_URL: >-
-        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}
-        ?createDatabaseIfNotExist=true
-        &useSSL=false
-        &allowPublicKeyRetrieval=true
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
       SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-game_admin}
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-devpassword123}
+      # Override ddl-auto=validate (set in application-prod.properties for production safety)
+      # back to update so Hibernate creates tables on a fresh local database.
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
       JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-key-32bytes!!}
       APP_ADMIN_EMAIL: ${APP_ADMIN_EMAIL:-admin@example.com}
       APP_ADMIN_PASSWORD: ${APP_ADMIN_PASSWORD:-Admin1234!}
@@ -68,13 +68,12 @@ services:
     ports:
       - "8098:8098"
     environment:
-      SPRING_DATASOURCE_URL: >-
-        jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}
-        ?createDatabaseIfNotExist=true
-        &useSSL=false
-        &allowPublicKeyRetrieval=true
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-game_db}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
       SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-game_admin}
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-devpassword123}
+      # Override ddl-auto=validate back to update for local dev (same reason as auth-service)
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
       JWT_SECRET: ${JWT_SECRET:-local-dev-jwt-secret-key-32bytes!!}
     depends_on:
       mysql:
