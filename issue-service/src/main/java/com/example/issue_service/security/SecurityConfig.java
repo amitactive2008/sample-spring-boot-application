@@ -32,8 +32,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.PUT, "/issues/**").hasAnyRole("USER", "ADMIN")
                 // Both USER and ADMIN can update status (PATCH)
                 .requestMatchers(HttpMethod.PATCH, "/issues/**").hasAnyRole("USER", "ADMIN")
-                // Both USER and ADMIN can delete issues
-                .requestMatchers(HttpMethod.DELETE, "/issues/**").hasAnyRole("USER", "ADMIN")
+                // Only ADMIN can delete issues
+                .requestMatchers(HttpMethod.DELETE, "/issues/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
         );
         return http.build();

@@ -17,6 +17,4 @@ public class RegisterRequestDTO {
 
     @NotBlank(message = "Password is required")
     private String password;
-
-    private String role; // optional, defaults to USER in service
 }
