@@ -20,6 +20,14 @@ happens over a shared Podman network; the only port exposed to the host is the f
 8. [Verify the Deployment](#8-verify-the-deployment)
 9. [Day-2 Operations](#9-day-2-operations)
 10. [Security & Code Quality Pipeline](#10-security--code-quality-pipeline)
+11. [Automated Pipeline Script](#11-automated-pipeline-script--security-pipelinesh)
+    - [11.1 What it does](#111-what-it-does)
+    - [11.2 Prerequisites](#112-prerequisites)
+    - [11.3 Usage](#113-usage)
+    - [11.4 Common run scenarios](#114-common-run-scenarios)
+    - [11.5 Where it fits in the workflow](#115-where-it-fits-in-the-workflow)
+    - [11.6 Reports](#116-reports)
+    - [11.7 Terminal output](#117-terminal-output)
 
 ---
 
@@ -1765,3 +1773,240 @@ jobs:
 | `SONAR_HOST` | SonarQube server URL (e.g., `http://sonarqube.internal:9000`) |
 | `SONAR_TOKEN` | SonarQube analysis token |
 | `STAGING_URL` | Full URL of the staging deployment for DAST (e.g., `http://staging.internal:3000`) |
+
+---
+
+## 11. Automated Pipeline Script — `security-pipeline.sh`
+
+`security-pipeline.sh` at the repository root runs the complete 12-step pipeline from
+Section 10 with a single command. It is designed to run on the **developer's workstation
+or a CI agent** — not inside a container. It installs every missing tool automatically
+and writes timestamped reports to `/tmp/pipeline-reports/`.
+
+---
+
+### 11.1 What it does
+
+The script orchestrates all 12 checks in the correct order and handles step dependencies
+automatically — if Maven Build fails, the steps that require compiled artifacts (NVD Check,
+Lint, SonarQube) are skipped rather than producing misleading results.
+
+```
+10.1  Gitleaks     ──► 10.2  Hadolint   ──► 10.3  Checkstyle ──► 10.4  Semgrep
+                                                                         │
+                    ┌────────────────────────────────────────────────────┘
+                    ▼
+               10.5  Maven Build
+               ├──► 10.6  NVD Check          (skipped if build fails)
+               ├──► 10.7  Lint               (skipped if build fails)
+               └──► 10.8  Podman Build
+                         └──► 10.9  Trivy    (skipped if images missing)
+                                    │
+               ┌────────────────────┘
+               ▼
+          10.10  SonarQube ──► 10.11  Quality Gate
+                                         │
+                                      MERGE
+                                         │
+                                    Deploy to staging
+                                         │
+                                         ▼
+                                  10.12  DAST (ZAP)
+```
+
+---
+
+### 11.2 Prerequisites
+
+The script auto-installs any missing tool using `brew` (macOS) or `apt` (Linux).
+No manual setup is required before running it.
+
+| Tool | Auto-installed? | Used for |
+|---|---|---|
+| `gitleaks` | Yes — GitHub binary release | Step 10.1 |
+| `hadolint` | Yes — `brew install hadolint` | Step 10.2 |
+| `semgrep` | Yes — `pip3 install semgrep` | Step 10.4 |
+| `trivy` | Yes — `brew install trivy` | Step 10.9 |
+| `jq` | Yes — `brew install jq` | JSON parsing throughout |
+| `node` / `npm` | Yes — `brew install node` | Step 10.7 (ESLint) |
+| `podman` | **Must be installed** — not auto-installed | Steps 10.8, 10.9, 10.10, 10.12 |
+| `./mvnw` | Already in each service directory | Steps 10.3, 10.5, 10.6, 10.7, 10.10 |
+
+> **NVD API key (optional but strongly recommended)**
+> Without one, the first NVD Check download takes 10–30 minutes.
+> Get a free key at https://nvd.nist.gov/developers/request-an-api-key
+
+---
+
+### 11.3 Usage
+
+```bash
+chmod +x security-pipeline.sh
+./security-pipeline.sh [OPTIONS]
+```
+
+| Option | Description |
+|---|---|
+| _(no options)_ | Full 12-step pipeline — installs missing tools, runs everything |
+| `--skip-sonar` | Skip SonarQube (10.10) and Quality Gate (10.11) — saves ~5 min + 1.5 GB RAM |
+| `--skip-dast` | Skip ZAP scan (10.12) — use when the app is not running |
+| `--skip-build` | Skip Maven Build (10.5) and Podman Build (10.8) — use cached JARs/images |
+| `--skip-install` | Abort instead of auto-installing a missing tool |
+| `--nvd-key KEY` | NVD API key for faster dependency scanning (step 10.6) |
+| `--app-url URL` | Base URL for DAST scan (default: `http://localhost`) |
+| `--repo DIR` | Repository root directory (default: current working directory) |
+
+Environment variables accepted as alternatives to flags:
+
+| Variable | Equivalent flag |
+|---|---|
+| `NVD_API_KEY` | `--nvd-key` |
+| `APP_URL` | `--app-url` |
+| `REPO_DIR` | `--repo` |
+| `SONAR_TOKEN` | Pre-existing SonarQube token — skips auto token generation |
+
+---
+
+### 11.4 Common run scenarios
+
+**Before every commit — fast pre-flight check (~2 min):**
+```bash
+./security-pipeline.sh --skip-sonar --skip-dast --skip-build
+```
+Runs: Gitleaks → Hadolint → Checkstyle → Semgrep → Trivy config scan
+
+**After a code change — full check without slow steps (~15–20 min):**
+```bash
+./security-pipeline.sh --skip-sonar --skip-dast --nvd-key $NVD_API_KEY
+```
+Runs everything except SonarQube and DAST.
+
+**Full pipeline including SonarQube (~25–30 min, needs ~1.5 GB free RAM):**
+```bash
+./security-pipeline.sh --skip-dast --nvd-key $NVD_API_KEY
+```
+
+**Full pipeline with DAST — app must be running via podman-compose:**
+```bash
+podman-compose up -d                       # ensure stack is running
+./security-pipeline.sh --nvd-key $NVD_API_KEY
+```
+
+**Re-run only security scans, skip rebuilding (images already built):**
+```bash
+./security-pipeline.sh --skip-build --skip-sonar --app-url http://localhost
+```
+
+**CI non-interactive mode — abort instead of auto-installing tools:**
+```bash
+./security-pipeline.sh --skip-install --nvd-key $NVD_API_KEY
+```
+
+---
+
+### 11.5 Where it fits in the workflow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Developer Workflow                                                      │
+│                                                                         │
+│  1. Make code changes                                                   │
+│  2. ./security-pipeline.sh --skip-sonar --skip-dast --skip-build        │
+│     └─ Gitleaks + Hadolint + Checkstyle + Semgrep + Trivy config        │
+│        Quick feedback before building anything                          │
+│                                                                         │
+│  3. podman-compose up --build -d                                        │
+│     └─ Build images + start stack                                       │
+│                                                                         │
+│  4. ./security-pipeline.sh --skip-sonar --nvd-key $NVD_API_KEY          │
+│     └─ Full pipeline including Trivy image scan + DAST against          │
+│        the running containers                                           │
+│                                                                         │
+│  5. Open pull request → GitHub Actions CI runs the same pipeline        │
+│     using the GitHub Actions skeleton in §10 Full CI Pipeline           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 11.6 Reports
+
+Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
+
+```
+/tmp/pipeline-reports/20260801-143022/
+├── pipeline.log                  ← combined log of all steps
+├── .gitleaks.toml                ← allowlist config used during scan
+├── gitleaks.log
+├── gitleaks.json                 ← findings (empty array = no secrets)
+├── hadolint.log
+├── checkstyle.xml                ← embedded ruleset used for the scan
+├── checkstyle.log
+├── semgrep-java.json             ← Java SAST findings
+├── semgrep-js.json               ← React/JS SAST findings
+├── semgrep.log
+├── build.log
+├── nvd.log
+│   (HTML + JSON reports also at: */target/dependency-check-report.*)
+├── lint.log
+├── podman_build.log
+├── trivy-config.json             ← Dockerfile + compose misconfiguration findings
+├── trivy-image-auth-service.json ← per-image CVE findings
+├── trivy-image-issue-service.json
+├── trivy-image-api-gateway.json
+├── trivy-image-frontend-service.json
+├── trivy.log
+├── sonar.log
+├── sonar-token.txt               ← SonarQube token (used by Quality Gate step)
+├── gate.log
+├── zap-report.html               ← open in browser for the full ZAP report
+└── zap-report.json
+```
+
+**SonarQube dashboard** (when step 10.10 runs):
+
+```
+URL   : http://localhost:9000
+Login : admin
+Pass  : PipelineAdmin@1234
+```
+
+The SonarQube container is started with `--restart unless-stopped` and persists
+between runs. Stop it manually when not needed:
+
+```bash
+podman stop sonarqube
+podman rm sonarqube
+```
+
+---
+
+### 11.7 Terminal output
+
+The script prints colour-coded progress for each step and ends with a summary table:
+
+```
+╔════════════════════════════════════════════════════════════╗
+║    SECURITY & CODE QUALITY PIPELINE — v2 SUMMARY           ║
+╠════════════════════════════════════════════════════════════╣
+║  ✔  10.1   Gitleaks          Secret Scanning          1s  ║
+║  ✔  10.2   Hadolint          Dockerfile Lint           0s  ║
+║  ✔  10.3   Checkstyle        Java Code Style          22s  ║
+║  ✔  10.4   Semgrep           SAST                     38s  ║
+║  ✔  10.5   Maven Build       Compile & Package       145s  ║
+║  ✔  10.6   NVD Check         Dependency CVEs         240s  ║
+║  ✔  10.7   Lint              ESLint + SpotBugs        28s  ║
+║  ✔  10.8   Podman Build      Container Images        180s  ║
+║  ✔  10.9   Trivy             Image + Config Scan      35s  ║
+║  ✔  10.10  SonarQube         Quality Analysis         65s  ║
+║  ✔  10.11  Quality Gate      Merge/Deploy Gate         8s  ║
+║  ✔  10.12  DAST              ZAP Dynamic Scan          95s ║
+╠════════════════════════════════════════════════════════════╣
+║  ALL CHECKS PASSED — safe to merge/deploy                  ║
+║  Pass:12  Fail:0  Skip:0  Total:857s                       ║
+║  Reports: /tmp/pipeline-reports/20260801-143022            ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+When a step fails, it is highlighted in red and the path to its log file is
+printed below the table for immediate investigation.
