@@ -60,9 +60,9 @@ apiGateway:
   replicas: 1
   port: 8096
   cors:
-    # All traffic enters via nginx on :8080 (same origin), so CORS is not
-    # strictly triggered.  Set to the real frontend origin in prod.
-    allowedOrigin: "http://localhost:8080"
+    # Traffic enters via Envoy Gateway on :8443 (same origin as the browser).
+    # Set to the real frontend origin in prod (e.g. https://yourdomain.com).
+    allowedOrigin: "https://localhost:8443"
   resources:
     requests:
       cpu: 250m
@@ -127,21 +127,58 @@ frontendService:
       cpu: 200m
       memory: 256Mi
 
-# ── Ingress ───────────────────────────────────────────────────────────────────
+# ── Legacy nginx Ingress (v3 compatibility) ───────────────────────────────────
+# Disabled when gatewayAPI.enabled=true.  Enable for plain nginx Ingress mode.
 ingress:
-  enabled: true
-  className: nginx          # use "alb" on AWS EKS
-  host: ""                  # empty = match all hosts (good for local dev)
+  enabled: false
+  className: nginx
+  host: ""
   annotations:
     nginx.ingress.kubernetes.io/use-regex: "true"
-    # Capture group $2 strips the /api prefix before forwarding to the gateway.
-    # The gateway then matches /auth/** and /issues/** as expected.
     nginx.ingress.kubernetes.io/rewrite-target: /$2
   paths:
     api: "/api(/|$)(.*)"
     apiPathType: ImplementationSpecific
     frontend: "/"
     frontendPathType: Prefix
+
+# ── Envoy Gateway API (v4 default) ────────────────────────────────────────────
+# Replaces the nginx Ingress with Envoy Gateway + HTTPRoute + cert-manager TLS.
+# Set enabled=false to fall back to the nginx Ingress above.
+gatewayAPI:
+  enabled: true
+  # Name of the Gateway resource — also used to discover the Envoy proxy Service.
+  gatewayName: issue-tracker-gateway
+  # GatewayClass installed by Envoy Gateway's Helm chart.
+  gatewayClassName: envoy-gateway
+  # Hostname the Gateway and Certificate are bound to.
+  # Use "localhost" for local kind dev; set to the real domain in prod.
+  hostname: "localhost"
+  # HTTP listener port (maps to kind extraPortMapping host:8080 → node:80)
+  httpPort: 80
+  # HTTPS listener port (maps to kind extraPortMapping host:8443 → node:443)
+  httpsPort: 443
+  # HTTP→HTTPS redirect: all plain HTTP requests are redirected to HTTPS.
+  httpRedirect: true
+  # /api prefix is stripped before the request reaches api-gateway
+  # (same behaviour as the nginx rewrite-target annotation in v3).
+  apiPrefix: "/api"
+
+# ── cert-manager TLS ──────────────────────────────────────────────────────────
+# Creates a ClusterIssuer and issues a Certificate stored in `tls.secretName`.
+# The Gateway's HTTPS listener references this Secret for TLS termination.
+tls:
+  enabled: true
+  # ClusterIssuer type: "selfsigned" (local dev) | "letsencrypt-staging" | "letsencrypt"
+  issuerType: selfsigned
+  # Let's Encrypt email — required when issuerType is letsencrypt*
+  acmeEmail: ""
+  # Name of the Kubernetes Secret that cert-manager writes the certificate into.
+  # Referenced by the Gateway HTTPS listener.
+  secretName: issue-tracker-tls-secret
+  # Certificate validity duration and renewal window.
+  duration: "2160h"    # 90 days
+  renewBefore: "360h"  # 15 days before expiry
 
 # ── ServiceAccount ────────────────────────────────────────────────────────────
 serviceAccount:

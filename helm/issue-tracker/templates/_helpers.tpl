@@ -61,3 +61,21 @@ Indented at the "paths:" child level (each path entry is a list item).
       port:
         number: 80
 {{- end }}
+
+{{/*
+cert-manager ClusterIssuer name — derived from tls.issuerType.
+  selfsigned          → issue-tracker-selfsigned-issuer
+  letsencrypt-staging → letsencrypt-staging
+  letsencrypt         → letsencrypt-prod
+*/}}
+{{- define "issue-tracker.clusterIssuerName" -}}
+{{- if eq .Values.tls.issuerType "selfsigned" -}}
+  issue-tracker-selfsigned-issuer
+{{- else if eq .Values.tls.issuerType "letsencrypt-staging" -}}
+  letsencrypt-staging
+{{- else if eq .Values.tls.issuerType "letsencrypt" -}}
+  letsencrypt-prod
+{{- else -}}
+  {{- fail (printf "tls.issuerType must be selfsigned | letsencrypt-staging | letsencrypt, got: %s" .Values.tls.issuerType) -}}
+{{- end -}}
+{{- end }}

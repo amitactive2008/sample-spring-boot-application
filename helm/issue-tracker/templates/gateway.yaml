@@ -1,0 +1,101 @@
+{{- if .Values.gatewayAPI.enabled }}
+# ──────────────────────────────────────────────────────────────────────────────
+# gateway.yaml — Envoy Gateway resources
+#
+# Two resources are created:
+#   1. EnvoyProxy  — configures how Envoy Gateway provisions the Envoy proxy
+#                    Deployment/Service for this release (NodePort + hostPort
+#                    so kind's extraPortMappings route traffic to localhost).
+#   2. Gateway     — declares the HTTP and HTTPS listeners; references the
+#                    TLS Secret created by cert-manager.
+#
+# The GatewayClass "envoy-gateway" is installed cluster-wide by the Envoy
+# Gateway Helm chart and is NOT created here.
+# ──────────────────────────────────────────────────────────────────────────────
+
+---
+# EnvoyProxy: configure the Envoy proxy deployment for this Gateway.
+# Using NodePort + hostPort lets the kind extraPortMappings (80→8080, 443→8443)
+# forward host traffic directly into the Envoy pods running on the kind node.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ .Values.gatewayAPI.gatewayName }}-proxy-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        # NodePort exposes the Envoy proxy on all nodes; kind's extraPortMappings
+        # map node port 80→hostPort 8080 and node port 443→hostPort 8443.
+        type: NodePort
+      envoyDeployment:
+        # Patch the Envoy container to bind hostPort on the kind node.
+        # This ties the Envoy pod's container port directly to the host network
+        # port, allowing kind's extraPortMappings to route the traffic.
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: envoy
+                      ports:
+                        - containerPort: {{ .Values.gatewayAPI.httpPort }}
+                          hostPort: {{ .Values.gatewayAPI.httpPort }}
+                          protocol: TCP
+                        - containerPort: {{ .Values.gatewayAPI.httpsPort }}
+                          hostPort: {{ .Values.gatewayAPI.httpsPort }}
+                          protocol: TCP
+
+---
+# Gateway: declares the listeners that Envoy Gateway provisions Envoy for.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gatewayAPI.gatewayName }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+  annotations:
+    # Tell cert-manager which ClusterIssuer to use for the HTTPS listener's TLS cert.
+    cert-manager.io/cluster-issuer: {{ include "issue-tracker.clusterIssuerName" . | quote }}
+spec:
+  # Reference the GatewayClass installed by Envoy Gateway's Helm chart.
+  gatewayClassName: {{ .Values.gatewayAPI.gatewayClassName }}
+
+  # Point the proxy config defined above at this Gateway.
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: {{ .Values.gatewayAPI.gatewayName }}-proxy-config
+
+  listeners:
+    # ── HTTP listener — redirects all traffic to HTTPS ──────────────────────
+    - name: http
+      protocol: HTTP
+      port: {{ .Values.gatewayAPI.httpPort }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+    # ── HTTPS listener — terminates TLS with cert-manager certificate ───────
+    - name: https
+      protocol: HTTPS
+      port: {{ .Values.gatewayAPI.httpsPort }}
+      hostname: {{ .Values.gatewayAPI.hostname | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.tls.secretName | quote }}
+            namespace: {{ .Values.global.namespace }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+{{- end }}

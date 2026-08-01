@@ -1,0 +1,125 @@
+{{- if and .Values.gatewayAPI.enabled .Values.tls.enabled }}
+# ──────────────────────────────────────────────────────────────────────────────
+# certmanager.yaml — cert-manager ClusterIssuer + Certificate
+#
+# Supports three issuer types (controlled by tls.issuerType):
+#   selfsigned          → self-signed certificate (local kind dev, no DNS needed)
+#   letsencrypt-staging → Let's Encrypt staging CA (test ACME flow, not trusted)
+#   letsencrypt         → Let's Encrypt production CA (publicly trusted)
+#
+# The Certificate's secretName matches tls.secretName referenced by the Gateway
+# HTTPS listener, so cert-manager writes the TLS keypair directly into the
+# Secret the Gateway reads for TLS termination.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── ClusterIssuer ─────────────────────────────────────────────────────────────
+{{- if eq .Values.tls.issuerType "selfsigned" }}
+---
+# Self-signed issuer — no external CA, no DNS required.
+# Issues certificates signed by a per-release CA key pair that is generated
+# in-cluster. Browsers will show an "untrusted" warning; accept it for local dev
+# or import the CA cert into your OS trust store.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ include "issue-tracker.clusterIssuerName" . }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+
+{{- else if eq .Values.tls.issuerType "letsencrypt-staging" }}
+---
+# Let's Encrypt staging — uses the staging CA so you can test ACME without
+# hitting rate limits.  Certificates are NOT browser-trusted.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ include "issue-tracker.clusterIssuerName" . }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: {{ required "tls.acmeEmail is required for letsencrypt issuer types" .Values.tls.acmeEmail | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: {{ .Values.gatewayAPI.gatewayName }}
+                namespace: {{ .Values.global.namespace }}
+                kind: Gateway
+
+{{- else if eq .Values.tls.issuerType "letsencrypt" }}
+---
+# Let's Encrypt production — publicly trusted certificates.
+# Requires a publicly reachable domain and HTTP-01 challenge access.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ include "issue-tracker.clusterIssuerName" . }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ required "tls.acmeEmail is required for letsencrypt issuer types" .Values.tls.acmeEmail | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: {{ .Values.gatewayAPI.gatewayName }}
+                namespace: {{ .Values.global.namespace }}
+                kind: Gateway
+{{- end }}
+
+---
+# ── Certificate ───────────────────────────────────────────────────────────────
+# cert-manager watches this resource and issues a certificate from the
+# ClusterIssuer above.  The resulting TLS keypair is stored in tls.secretName
+# (a Kubernetes Secret of type kubernetes.io/tls), which the Gateway's HTTPS
+# listener reads for TLS termination.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-tls-cert
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  # Name of the Secret cert-manager will create/update with the TLS keypair.
+  # Must match tls.secretName referenced by the Gateway HTTPS listener.
+  secretName: {{ .Values.tls.secretName | quote }}
+
+  duration: {{ .Values.tls.duration | quote }}
+  renewBefore: {{ .Values.tls.renewBefore | quote }}
+
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+
+  # Subject Alternative Names (SANs) — the hostnames and IPs the cert covers.
+  dnsNames:
+    - {{ .Values.gatewayAPI.hostname | quote }}
+    {{- if eq .Values.gatewayAPI.hostname "localhost" }}
+    # Also cover 127.0.0.1 when running on localhost so curl --resolve works.
+    {{- end }}
+  {{- if eq .Values.gatewayAPI.hostname "localhost" }}
+  ipAddresses:
+    - "127.0.0.1"
+  {{- end }}
+
+  issuerRef:
+    name: {{ include "issue-tracker.clusterIssuerName" . | quote }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

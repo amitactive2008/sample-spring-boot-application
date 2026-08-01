@@ -1,0 +1,31 @@
+# kind cluster configuration for local development (v4 — Envoy Gateway + HTTPS)
+#
+# Port mappings on the control-plane node:
+#   host:8080  → node:80   (HTTP — Envoy Gateway plain HTTP listener)
+#   host:8443  → node:443  (HTTPS — Envoy Gateway TLS listener)
+#
+# The Envoy Gateway Deployment uses hostPort to bind these container ports
+# directly on the kind node so kind's extraPortMappings route them to localhost.
+#
+# Usage:
+#   kind create cluster --name issue-app --config kind/kind-cluster.yaml
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # HTTP — Envoy Gateway plain listener + HTTP→HTTPS redirect
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      # HTTPS — Envoy Gateway TLS listener (cert-manager self-signed cert)
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP

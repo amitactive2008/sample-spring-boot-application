@@ -1,0 +1,83 @@
+{{- if .Values.gatewayAPI.enabled }}
+# ──────────────────────────────────────────────────────────────────────────────
+# httproute.yaml — Gateway API HTTPRoute resources
+#
+# Two HTTPRoute resources:
+#   1. http-redirect  — attached to the HTTP listener; issues a 301 redirect
+#                       to HTTPS for every incoming plain-HTTP request.
+#   2. https-routes   — attached to the HTTPS listener; routes:
+#                         /api/* → api-gateway (strips /api prefix via URLRewrite)
+#                         /      → frontend-service
+# ──────────────────────────────────────────────────────────────────────────────
+
+---
+# HTTPRoute 1: HTTP → HTTPS permanent redirect
+{{- if .Values.gatewayAPI.httpRedirect }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gatewayAPI.gatewayName }}-http-redirect
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gatewayAPI.gatewayName }}
+      namespace: {{ .Values.global.namespace }}
+      sectionName: http          # bind only to the HTTP listener
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301      # permanent redirect — browsers cache this
+{{- end }}
+
+---
+# HTTPRoute 2: HTTPS application routing
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Values.gatewayAPI.gatewayName }}-https-routes
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gatewayAPI.gatewayName }}
+      namespace: {{ .Values.global.namespace }}
+      sectionName: https         # bind only to the HTTPS listener
+  {{- if .Values.gatewayAPI.hostname }}
+  hostnames:
+    - {{ .Values.gatewayAPI.hostname | quote }}
+  {{- end }}
+  rules:
+    # ── Rule 1: /api/* → api-gateway (strip /api prefix) ─────────────────────
+    # The api-gateway's Spring Cloud Gateway routes expect /auth/** and /issues/**
+    # without the /api prefix.  URLRewrite strips it before forwarding.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .Values.gatewayAPI.apiPrefix | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              # Replace /api with / so /api/auth/login → /auth/login
+              replacePrefixMatch: "/"
+      backendRefs:
+        - name: api-gateway
+          port: 80
+          weight: 1
+
+    # ── Rule 2: / → frontend-service ─────────────────────────────────────────
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/"
+      backendRefs:
+        - name: frontend-service
+          port: 80
+          weight: 1
+{{- end }}
