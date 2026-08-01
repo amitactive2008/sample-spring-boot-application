@@ -28,6 +28,14 @@ happens over a shared Podman network; the only port exposed to the host is the f
     - [11.5 Where it fits in the workflow](#115-where-it-fits-in-the-workflow)
     - [11.6 Reports](#116-reports)
     - [11.7 Terminal output](#117-terminal-output)
+12. [Shutdown & Cleanup](#12-shutdown--cleanup)
+    - [12.1 Stop — keep data](#121-stop--keep-data-restart-later)
+    - [12.2 Full reset — wipe database](#122-full-reset--wipe-database)
+    - [12.3 Full clean — remove images too](#123-full-clean--remove-images-too)
+    - [12.4 Nuclear clean — prune entire Podman system](#124-nuclear-clean--prune-entire-podman-system)
+    - [12.5 Pipeline artifact cleanup](#125-pipeline-artifact-cleanup)
+    - [12.6 Pod teardown](#126-pod-teardown-section-6-users)
+    - [12.7 Podman machine](#127-podman-machine-macos-only)
 
 ---
 
@@ -2010,3 +2018,283 @@ The script prints colour-coded progress for each step and ends with a summary ta
 
 When a step fails, it is highlighted in red and the path to its log file is
 printed below the table for immediate investigation.
+
+---
+
+## 12. Shutdown & Cleanup
+
+This section covers every level of teardown — from a simple pause that keeps all data,
+to a complete wipe of containers, volumes, images, and pipeline artifacts.
+
+---
+
+### 12.1 Stop — keep data (restart later)
+
+Stops all running containers but preserves the MySQL volume and built images.
+Use this for a temporary pause — a `podman-compose up -d` will bring everything
+back up in seconds.
+
+```bash
+podman-compose down
+```
+
+Verify everything stopped:
+
+```bash
+podman ps                       # should show no issue-app-* containers
+podman volume ls                # mysql_data volume still present
+```
+
+Restart later:
+
+```bash
+podman-compose up -d            # no --build needed — images are cached
+```
+
+---
+
+### 12.2 Full reset — wipe database
+
+Stops containers **and deletes the MySQL data volume**. All database tables and rows are
+permanently lost. Use this when you want a clean slate (e.g., re-seeding with fresh data,
+schema migration testing, or switching between `.env` credentials).
+
+```bash
+podman-compose down -v
+```
+
+What `-v` removes:
+- `mysql_data` named volume → all database contents gone
+
+What it keeps:
+- Built container images (fast restart on next `up`)
+- Your `.env` file
+- Source code and `target/` directories
+
+After the next `podman-compose up -d`, Hibernate re-creates all tables
+(`ddl-auto=update` in `docker-compose.yml`) and the `DataSeeder` re-seeds the
+admin account.
+
+---
+
+### 12.3 Full clean — remove images too
+
+Removes containers, volumes, **and all locally built images**. The next `up --build`
+will re-compile all JARs from scratch and pull base images again (~10–20 min).
+Use this to force a completely fresh build or free up significant disk space.
+
+```bash
+podman-compose down --rmi all -v
+```
+
+What `--rmi all` removes (in addition to `-v`):
+- `localhost/sample-spring-bot-application_auth-service:latest`
+- `localhost/sample-spring-bot-application_issue-service:latest`
+- `localhost/sample-spring-bot-application_api-gateway:latest`
+- `localhost/sample-spring-bot-application_frontend-service:latest`
+
+Base images (`mysql:8.0`, `eclipse-temurin:21-jre`, `node:20`, etc.) are **not**
+removed — they remain in the local cache so the next build only re-downloads your
+application's dependencies, not the base layers.
+
+Check disk space freed:
+
+```bash
+podman system df                # shows image/container/volume disk usage
+```
+
+---
+
+### 12.4 Nuclear clean — prune entire Podman system
+
+Removes **everything** not currently in use: stopped containers, dangling images,
+unused volumes, and the build cache. Run this when you need to reclaim the maximum
+amount of disk space.
+
+> **Warning:** This removes volumes from ALL Podman projects, not just this one.
+> Only run this if you have no other Podman projects with data you want to keep.
+
+```bash
+# Step 1 — stop and remove this project's containers and volumes
+podman-compose down -v
+
+# Step 2 — prune all unused Podman resources
+podman system prune --all --volumes --force
+```
+
+Individual targeted prune commands (safer alternatives):
+
+```bash
+# Remove only stopped containers
+podman container prune --force
+
+# Remove only dangling (untagged) images
+podman image prune --force
+
+# Remove only unused named volumes
+podman volume prune --force
+
+# Remove only the build cache
+podman system prune --force          # excludes volumes by default
+```
+
+After a nuclear clean, verify:
+
+```bash
+podman ps -a                         # no containers
+podman images                        # only explicitly kept images
+podman volume ls                     # no volumes
+podman system df                     # all sizes near zero
+```
+
+---
+
+### 12.5 Pipeline artifact cleanup
+
+The `security-pipeline.sh` script and SonarQube leave behind reports, containers,
+and compiled artifacts. Clean them up as follows.
+
+**Remove pipeline report directories:**
+
+```bash
+# Remove all timestamped runs
+rm -rf /tmp/pipeline-reports/
+
+# Remove only runs older than 7 days
+find /tmp/pipeline-reports -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
+```
+
+**Stop and remove the SonarQube container** (started by `--skip-sonar` off runs):
+
+```bash
+podman stop sonarqube
+podman rm   sonarqube
+podman volume rm sonarqube_data      # removes all SonarQube analysis history
+```
+
+**Remove Maven build artifacts** from all three services:
+
+```bash
+./auth-service/mvnw  -f auth-service/pom.xml  clean
+./issue-service/mvnw -f issue-service/pom.xml clean
+./api-gateway/mvnw   -f api-gateway/pom.xml   clean
+```
+
+Or in a single pass from the repo root:
+
+```bash
+for svc in auth-service issue-service api-gateway; do
+  ./${svc}/mvnw -f ${svc}/pom.xml clean -q
+done
+```
+
+**Remove frontend dependencies and build output:**
+
+```bash
+rm -rf frontend-service/node_modules
+rm -rf frontend-service/build
+```
+
+**Remove OWASP Dependency-Check cached data** (~500 MB on first run):
+
+```bash
+rm -rf ~/.owasp/dependency-check-data
+```
+
+---
+
+### 12.6 Pod teardown (Section 6 users)
+
+If you deployed using a Podman pod (§6) instead of `podman-compose`:
+
+```bash
+# Stop all containers in the pod
+podman pod stop issue-tracker
+
+# Remove the pod and all its containers
+podman pod rm issue-tracker
+
+# Remove the MySQL data volume
+podman volume rm mysql_data
+
+# Remove the built images
+podman rmi issue-auth-service issue-issue-service issue-api-gateway issue-frontend
+
+# Disable and remove the systemd units (if §6.7 was followed)
+systemctl --user disable --now pod-issue-tracker.service
+rm -f ~/.config/systemd/user/pod-issue-tracker.service
+rm -f ~/.config/systemd/user/container-issue-app-*.service
+systemctl --user daemon-reload
+```
+
+---
+
+### 12.7 Podman machine (macOS only)
+
+On macOS, Podman runs inside a lightweight VM managed by `podman machine`.
+The commands below control the VM itself — **not the containers inside it**.
+
+**Stop the VM** (frees RAM + CPU — containers are paused, not deleted):
+
+```bash
+podman machine stop
+```
+
+**Start the VM again** (containers that were running resume automatically):
+
+```bash
+podman machine start
+```
+
+**Check VM status:**
+
+```bash
+podman machine list
+```
+
+Expected output when running:
+
+```
+NAME                     VM TYPE   CREATED        LAST UP       CPUS   MEMORY    DISK SIZE
+podman-machine-default   applehv   14 months ago  2 hours ago   10     14.9GiB   93GiB
+```
+
+**Remove the VM entirely** (frees all disk — deletes every container, image, and volume
+inside the VM — equivalent to a full system wipe):
+
+```bash
+podman machine stop
+podman machine rm podman-machine-default
+```
+
+Recreate the VM from scratch when needed:
+
+```bash
+podman machine init --cpus 4 --memory 8192 --disk-size 60
+podman machine start
+```
+
+---
+
+### Quick reference — shutdown decision tree
+
+```
+Do you want to stop the app?
+│
+├── YES, temporarily (restart later with data intact)
+│       podman-compose down
+│
+├── YES, and reset the database to a clean state
+│       podman-compose down -v
+│
+├── YES, and force a complete rebuild next time
+│       podman-compose down --rmi all -v
+│
+├── YES, and reclaim all disk space (multi-project safe)
+│       podman-compose down -v
+│       podman system prune --all --force          # keeps volumes of other projects
+│
+└── YES, and wipe everything including other projects
+        podman-compose down -v
+        podman system prune --all --volumes --force
+```
