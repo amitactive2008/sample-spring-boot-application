@@ -1,0 +1,209 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - openjdk-17-jdk
+  - maven
+  - mysql-server
+  - nginx
+  - git
+  - curl
+
+write_files:
+
+  - path: /etc/issue-tracker/auth-service.env
+    owner: root:root
+    permissions: '0640'
+    content: |
+      SPRING_PROFILES_ACTIVE=prod
+      SERVER_PORT=8097
+      SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/authdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME=appuser
+      SPRING_DATASOURCE_PASSWORD=StrongPass@2024!
+      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
+      JWT_EXPIRATIONMINUTES=60
+      APP_ADMIN_EMAIL=admin@example.com
+      APP_ADMIN_PASSWORD=Admin@2024!
+      MAIL_ENABLED=false
+      SES_USERNAME=not-configured
+      SES_PASSWORD=not-configured
+
+  - path: /etc/issue-tracker/issue-service.env
+    owner: root:root
+    permissions: '0640'
+    content: |
+      SPRING_PROFILES_ACTIVE=prod
+      SERVER_PORT=8098
+      SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/issuedb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME=appuser
+      SPRING_DATASOURCE_PASSWORD=StrongPass@2024!
+      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
+      JWT_EXPIRATIONMINUTES=60
+
+  - path: /etc/issue-tracker/api-gateway.env
+    owner: root:root
+    permissions: '0640'
+    content: |
+      SPRING_PROFILES_ACTIVE=local
+      SERVER_PORT=8096
+      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
+      CORS_ALLOWED_ORIGIN=*
+
+  - path: /etc/systemd/system/auth-service.service
+    content: |
+      [Unit]
+      Description=Issue Tracker - Auth Service (port 8097)
+      After=network.target mysql.service
+      Requires=mysql.service
+      [Service]
+      Type=simple
+      User=issueapp
+      Group=issueapp
+      EnvironmentFile=/etc/issue-tracker/auth-service.env
+      ExecStart=/usr/bin/java -jar /opt/issue-tracker/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar
+      Restart=on-failure
+      RestartSec=15
+      SuccessExitStatus=143
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=auth-service
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/issue-service.service
+    content: |
+      [Unit]
+      Description=Issue Tracker - Issue Service (port 8098)
+      After=network.target mysql.service
+      Requires=mysql.service
+      [Service]
+      Type=simple
+      User=issueapp
+      Group=issueapp
+      EnvironmentFile=/etc/issue-tracker/issue-service.env
+      ExecStart=/usr/bin/java -jar /opt/issue-tracker/issue-service/target/issue-service-0.0.1-SNAPSHOT.jar
+      Restart=on-failure
+      RestartSec=15
+      SuccessExitStatus=143
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=issue-service
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/api-gateway.service
+    content: |
+      [Unit]
+      Description=Issue Tracker - API Gateway (port 8096)
+      After=network.target auth-service.service issue-service.service
+      [Service]
+      Type=simple
+      User=issueapp
+      Group=issueapp
+      EnvironmentFile=/etc/issue-tracker/api-gateway.env
+      ExecStart=/usr/bin/java -jar /opt/issue-tracker/api-gateway/target/api-gateway-0.0.1-SNAPSHOT.jar
+      Restart=on-failure
+      RestartSec=15
+      SuccessExitStatus=143
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=api-gateway
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/nginx/sites-available/issue-tracker
+    content: |
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+          root /opt/issue-tracker/frontend-service/build;
+          index index.html;
+          location /auth/ {
+              proxy_pass http://127.0.0.1:8096;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_read_timeout 60s;
+          }
+          location /issues {
+              proxy_pass http://127.0.0.1:8096;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_read_timeout 60s;
+          }
+          location / {
+              try_files $uri $uri/ /index.html;
+          }
+      }
+
+  - path: /opt/provision.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec > >(tee -a /var/log/issue-tracker-setup.log) 2>&1
+      echo "=== Provisioning started: $(date) ==="
+
+      # Wait for MySQL
+      for i in $(seq 1 30); do
+        mysql -u root -e "SELECT 1;" &>/dev/null && break || sleep 3
+      done
+
+      # Create databases + user
+      mysql -u root <<'SQL'
+      CREATE DATABASE IF NOT EXISTS authdb  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+      CREATE DATABASE IF NOT EXISTS issuedb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+      CREATE USER IF NOT EXISTS 'appuser'@'localhost' IDENTIFIED BY 'StrongPass@2024!';
+      GRANT ALL PRIVILEGES ON authdb.*  TO 'appuser'@'localhost';
+      GRANT ALL PRIVILEGES ON issuedb.* TO 'appuser'@'localhost';
+      FLUSH PRIVILEGES;
+      SQL
+
+      # Node.js 18
+      curl -fsSL https://deb.nodesource.com/setup_18.x | bash - >/dev/null 2>&1
+      apt-get install -y nodejs >/dev/null 2>&1
+
+      # Clone
+      git clone --branch v1 --depth 1 \
+        https://github.com/amitactive2008/sample-spring-boot-application.git \
+        /opt/issue-tracker
+
+      # Maven builds
+      mvn -f /opt/issue-tracker/auth-service/pom.xml  clean package -DskipTests -q
+      mvn -f /opt/issue-tracker/issue-service/pom.xml clean package -DskipTests -q
+      mvn -f /opt/issue-tracker/api-gateway/pom.xml   clean package -DskipTests -q
+
+      # React build
+      cd /opt/issue-tracker/frontend-service
+      REACT_APP_API_BASE_URL="" npm install --silent
+      REACT_APP_API_BASE_URL="" npm run build
+
+      # System user + permissions
+      useradd --system --no-create-home --shell /usr/sbin/nologin issueapp 2>/dev/null || true
+      chown -R issueapp:issueapp /opt/issue-tracker
+      chgrp issueapp /etc/issue-tracker/*.env
+
+      # Nginx
+      rm -f /etc/nginx/sites-enabled/default
+      ln -sf /etc/nginx/sites-available/issue-tracker /etc/nginx/sites-enabled/issue-tracker
+      nginx -t && systemctl enable --now nginx && systemctl reload nginx
+
+      # Spring Boot services
+      systemctl daemon-reload
+      systemctl enable auth-service issue-service api-gateway
+      systemctl start auth-service && sleep 20
+      systemctl start issue-service && sleep 10
+      systemctl start api-gateway
+
+      echo "=== Provisioning complete: $(date) ==="
+      echo "Frontend: http://$(hostname -I | awk '{print $1}')/"
+
+runcmd:
+  - /opt/provision.sh
