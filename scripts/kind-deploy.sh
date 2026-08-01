@@ -30,11 +30,11 @@ if [[ "${1:-}" == "teardown" ]]; then
 fi
 
 # ── Validate tools ────────────────────────────────────────────────────────────
-for tool in kind kubectl docker; do
+for tool in kind kubectl podman; do
   command -v "$tool" &>/dev/null || die "'$tool' is not installed. See prerequisites in script header."
 done
 
-docker info &>/dev/null || die "Docker is not running. Start Docker Desktop first."
+podman info &>/dev/null || die "Podman is not running. Start Podman first."
 
 # ── 1. Create kind cluster ────────────────────────────────────────────────────
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
@@ -63,18 +63,18 @@ ok "nginx ingress controller is ready."
 
 # ── 3. Build Docker images ────────────────────────────────────────────────────
 info "Building Docker images (this takes a few minutes on first run)..."
-docker build -t api-gateway:local     ./api-gateway
-docker build -t auth-service:local    ./auth-service
-docker build -t issue-service:local   ./issue-service
-docker build -t frontend-service:local ./frontend-service
+podman build -t api-gateway:local     ./api-gateway
+podman build -t auth-service:local    ./auth-service
+podman build -t issue-service:local   ./issue-service
+podman build -t frontend-service:local ./frontend-service
 ok "Images built."
 
 # ── 4. Load images into kind ──────────────────────────────────────────────────
 info "Loading images into kind cluster..."
-kind load docker-image api-gateway:local      --name "$CLUSTER_NAME"
-kind load docker-image auth-service:local     --name "$CLUSTER_NAME"
-kind load docker-image issue-service:local    --name "$CLUSTER_NAME"
-kind load docker-image frontend-service:local --name "$CLUSTER_NAME"
+kind load podman-image api-gateway:local      --name "$CLUSTER_NAME"
+kind load podman-image auth-service:local     --name "$CLUSTER_NAME"
+kind load podman-image issue-service:local    --name "$CLUSTER_NAME"
+kind load podman-image frontend-service:local --name "$CLUSTER_NAME"
 ok "Images loaded."
 
 # ── 5. Deploy via Kustomize ───────────────────────────────────────────────────
