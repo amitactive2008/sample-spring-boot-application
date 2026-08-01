@@ -4,5 +4,5 @@ kind: ConfigMap
 metadata:
   name: auth-service-config
 data:
-  SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/game_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+  SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/game_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
   MAIL_ENABLED: "false"

@@ -1,4 +1,7 @@
-# Patch: issue-service — imagePullPolicy: Never (locally loaded image)
+# Patch: issue-service
+#   1. imagePullPolicy: Never — locally loaded image.
+#   2. SPRING_JPA_HIBERNATE_DDL_AUTO=update — overrides ddl-auto=validate set
+#      in application-prod.properties so Hibernate creates tables on a fresh DB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,3 +12,6 @@ spec:
       containers:
         - name: issue-service
           imagePullPolicy: Never
+          env:
+            - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+              value: "update"

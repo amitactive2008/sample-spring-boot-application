@@ -1,0 +1,16 @@
+# Patch: issue-service Service — replace port 80 with 8098.
+# The api-gateway prod routes to http://issue-service:8098 (from application-prod.yml).
+# $patch: delete removes the base port 80 before adding port 8098.
+apiVersion: v1
+kind: Service
+metadata:
+  name: issue-service
+spec:
+  ports:
+    - $patch: delete
+      port: 80
+      protocol: TCP
+    - name: http
+      protocol: TCP
+      port: 8098
+      targetPort: 8098

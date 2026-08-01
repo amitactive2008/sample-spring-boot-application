@@ -3,6 +3,9 @@
 #   2. APP_ADMIN_EMAIL / APP_ADMIN_PASSWORD — required by DataSeeder.java
 #      (@Value("${app.admin.email}") etc.) but missing from the base Deployment
 #      manifest; injected here from the kind secrets.yaml.
+#   3. SPRING_JPA_HIBERNATE_DDL_AUTO=update — overrides ddl-auto=validate set
+#      in application-prod.properties so Hibernate creates tables on a fresh DB.
+#   4. SPRING_DATASOURCE_URL includes serverTimezone=UTC to suppress MySQL warnings.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,3 +27,5 @@ spec:
                 secretKeyRef:
                   name: auth-service-secrets
                   key: APP_ADMIN_PASSWORD
+            - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+              value: "update"

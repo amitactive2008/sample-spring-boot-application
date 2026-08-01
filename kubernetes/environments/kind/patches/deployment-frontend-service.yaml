@@ -1,4 +1,8 @@
-# Patch: frontend-service — imagePullPolicy: Never (locally loaded image)
+# Patch: frontend-service
+#   1. imagePullPolicy: Never — locally loaded image.
+#   2. Increase memory limit: react-scripts start (CRA dev server) requires
+#      ~512MB-1GB; the base manifest allocates only 256Mi which causes OOMKill.
+#      NODE_OPTIONS=--max-old-space-size=512 caps the V8 heap to stay within limits.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,3 +13,13 @@ spec:
       containers:
         - name: frontend-service
           imagePullPolicy: Never
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=512"

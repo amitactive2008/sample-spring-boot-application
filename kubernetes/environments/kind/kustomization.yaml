@@ -32,32 +32,70 @@ resources:
   - secrets.yaml                   # plain Secrets (replaces ExternalSecrets)
   - ingress.yaml                   # nginx ingress (replaces ALB ingress)
 
-# ── Image overrides (local builds loaded via `kind load docker-image`) ──
+# ── Image overrides ──────────────────────────────────────────────
+# Images are built with Podman and loaded via:
+#   podman save localhost/<name>:local | kind load image-archive /dev/stdin
+# Podman qualifies all unregistered image names with "localhost/" — so the
+# tag in containerd is localhost/<name>:local, not <name>:local.
 images:
   - name: api-gateway
-    newName: api-gateway
+    newName: localhost/api-gateway
     newTag: local
   - name: auth-service
-    newName: auth-service
+    newName: localhost/auth-service
     newTag: local
   - name: issue-service
-    newName: issue-service
+    newName: localhost/issue-service
     newTag: local
   - name: frontend-service
-    newName: frontend-service
+    newName: localhost/frontend-service
     newTag: local
 
 # ── Patches ──────────────────────────────────────────────────────
+# Explicit target: selectors are required by Kustomize v5 when the patch
+# file itself does not carry a namespace (the namespace: issue-app above
+# is applied to resources, not to patch metadata matching).
 patches:
   # ConfigMaps: swap RDS URL → in-cluster mysql:3306; disable mail
   - path: patches/configmap-auth.yaml
+    target:
+      kind: ConfigMap
+      name: auth-service-config
   - path: patches/configmap-issue.yaml
+    target:
+      kind: ConfigMap
+      name: issue-service-config
 
   # PVC: swap AWS gp2 StorageClass → kind built-in "standard"
   - path: patches/pvc-storageclass.yaml
+    target:
+      kind: PersistentVolumeClaim
+      name: issue-storage-pvc
+
+  # Services: align ports with what api-gateway routes expect (8097/8098)
+  - path: patches/service-auth.yaml
+    target:
+      kind: Service
+      name: auth-service
+  - path: patches/service-issue.yaml
+    target:
+      kind: Service
+      name: issue-service
 
   # Deployments: CORS origin, admin seed credentials, imagePullPolicy
   - path: patches/deployment-api-gateway.yaml
+    target:
+      kind: Deployment
+      name: api-gateway
   - path: patches/deployment-auth-service.yaml
+    target:
+      kind: Deployment
+      name: auth-service
   - path: patches/deployment-issue-service.yaml
+    target:
+      kind: Deployment
+      name: issue-service
   - path: patches/deployment-frontend-service.yaml
+    target:
+      kind: Deployment
+      name: frontend-service
