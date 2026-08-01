@@ -37,7 +37,7 @@ that swaps out AWS-specific resources (RDS, ALB, Secrets Manager) for local equi
 | URL path routing | Nginx proxy blocks | Ingress rewrite-target strips `/api` prefix |
 | Secrets | `.env` file | Kubernetes `Secret` objects |
 | Non-secret config | inline env in Compose | `ConfigMap` objects |
-| Image delivery | `podman build` → local | `docker build` → `kind load docker-image` |
+| Image delivery | `podman build` → local | `podman build` → `podman save \| kind load image-archive` |
 | Storage | Podman named volume | PersistentVolumeClaim (kind `standard` StorageClass) |
 | Service discovery | container DNS names | Kubernetes Service DNS (`<svc>.<ns>.svc.cluster.local`) |
 | Base manifests | N/A | Kustomize `base/` — same YAMLs used in production (AWS) |
@@ -447,25 +447,28 @@ production (AWS EKS) and local (kind).
 
 | Patch file | What it changes |
 |---|---|
-| `patches/configmap-auth.yaml` | `SPRING_DATASOURCE_URL`: RDS hostname → `mysql:3306`; `MAIL_ENABLED`: true → false |
+| `patches/configmap-auth.yaml` | `SPRING_DATASOURCE_URL`: RDS → `mysql:3306` with `serverTimezone=UTC`; `MAIL_ENABLED` → false |
 | `patches/configmap-issue.yaml` | Same DB URL swap for issue-service |
 | `patches/pvc-storageclass.yaml` | `storageClassName`: gp2 → standard |
+| `patches/service-auth.yaml` | Service port: 80 → **8097** (matches `http://auth-service:8097` in gateway routes) |
+| `patches/service-issue.yaml` | Service port: 80 → **8098** (matches `http://issue-service:8098` in gateway routes) |
 | `patches/deployment-api-gateway.yaml` | `imagePullPolicy: Never`; `CORS_ALLOWED_ORIGIN: http://localhost:8080` |
-| `patches/deployment-auth-service.yaml` | `imagePullPolicy: Never`; inject `APP_ADMIN_EMAIL/PASSWORD` from Secret |
-| `patches/deployment-issue-service.yaml` | `imagePullPolicy: Never` |
-| `patches/deployment-frontend-service.yaml` | `imagePullPolicy: Never` |
+| `patches/deployment-auth-service.yaml` | `imagePullPolicy: Never`; inject `APP_ADMIN_EMAIL/PASSWORD` from Secret; `SPRING_JPA_HIBERNATE_DDL_AUTO: update` (overrides prod validate — fresh DB has no tables) |
+| `patches/deployment-issue-service.yaml` | `imagePullPolicy: Never`; `SPRING_JPA_HIBERNATE_DDL_AUTO: update` |
+| `patches/deployment-frontend-service.yaml` | `imagePullPolicy: Never`; memory limit 256Mi → **1Gi** (react-scripts OOMKills at 256Mi); `NODE_OPTIONS=--max-old-space-size=512` |
 
 ### 7.4 Image overrides
 
 ```yaml
 images:
   - name: auth-service
-    newName: auth-service
-    newTag: local    # matches the tag used in docker build / kind load
+    newName: localhost/auth-service   # Podman qualifies local images with localhost/
+    newTag: local
 ```
 
-`imagePullPolicy: Never` + `newTag: local` ensures Kubernetes uses the locally loaded
-image and never attempts to pull from a registry.
+`imagePullPolicy: Never` + `newName: localhost/<name>` + `newTag: local` ensures
+Kubernetes uses the image loaded via `podman save | kind load image-archive` and
+never attempts to pull from an external registry.
 
 ### 7.5 Ingress path rewrite
 
@@ -623,11 +626,12 @@ kubectl get events -n issue-app --sort-by='.lastTimestamp'
 ### Rebuild and redeploy a single service
 
 ```bash
-# Rebuild
-docker build -t auth-service:local ./auth-service
+# Rebuild with Podman (localhost/ prefix required — see §6.3)
+podman build -t localhost/auth-service:local ./auth-service
 
-# Reload into kind
-kind load docker-image auth-service:local --name issue-app
+# Reload into kind via image archive
+podman save localhost/auth-service:local \
+  | kind load image-archive /dev/stdin --name issue-app
 
 # Restart the deployment (triggers a rolling update)
 kubectl rollout restart -n issue-app deploy/auth-service
@@ -728,7 +732,7 @@ Developer push / Pull Request
   └──────┬───────┘
           ▼
   ┌─────────────────────┐
-  │  11. docker build   │  ← Build all 4 images
+  │  11. podman build   │  ← Build all 4 images (local) / docker build (CI)
   └──────────┬──────────┘
           ▼
   ┌──────────────────┐
@@ -1415,7 +1419,10 @@ jobs:
           kind load docker-image frontend-service:local --name $CLUSTER_NAME
       - name: Deploy to kind
         if: github.ref == 'refs/heads/main'
-        run: kubectl apply -k kubernetes/environments/kind
+        run: |
+          kubectl kustomize kubernetes/environments/kind \
+            --load-restrictor=LoadRestrictionsNone \
+          | kubectl apply -f -
 
   # ── 15. DAST — runs against the kind staging cluster ──────────────────────
   dast:
@@ -1456,7 +1463,7 @@ SonarQube, Quality Gate, DAST) with a single command.
 
 In the v3 context it is intended to run on the **developer's workstation or a
 CI agent** — not inside the Kind cluster. It checks source code and container
-images before `kind load docker-image` pushes them into the cluster.
+images before they are loaded into kind.
 
 ### 13.1 Usage
 
@@ -1479,11 +1486,14 @@ chmod +x security-pipeline.sh
 ### 13.2 Where it fits in the v3 workflow
 
 ```
-1. ./security-pipeline.sh --skip-dast    ← run before building images
-2. docker build / kind load docker-image
-3. kubectl apply -k kubernetes/environments/kind
-4. ./security-pipeline.sh --skip-sonar  ← DAST against the live cluster
-   --app-url http://localhost:8080
+1. ./security-pipeline.sh --skip-dast          ← run before building images
+2. podman build -t localhost/<name>:local ...   ← build with Podman
+3. podman save <img> | kind load image-archive  ← load into kind
+4. kubectl kustomize kubernetes/environments/kind \
+     --load-restrictor=LoadRestrictionsNone \
+   | kubectl apply -f -                         ← deploy
+5. ./security-pipeline.sh --skip-sonar \        ← DAST against live cluster
+     --app-url http://localhost:8080
 ```
 
 ### 13.3 Options
@@ -1493,8 +1503,8 @@ chmod +x security-pipeline.sh
 | `--skip-sonar` | Skip SonarQube + Quality Gate (no Docker needed) |
 | `--skip-dast` | Skip ZAP scan (use before cluster is deployed) |
 | `--nvd-key KEY` | NVD API key for faster dependency scanning |
-| `--app-url URL` | Target URL for DAST (default: `http://localhost`, use `http://localhost:8080` for Kind) |
-| `--repo DIR` | Repository root (default: `/opt/issue-tracker`, override if cloned elsewhere) |
+| `--app-url URL` | Target URL for DAST (default: `http://localhost`; use `http://localhost:8080` for Kind) |
+| `--repo DIR` | Repository root (default: current directory) |
 | `--skip-install` | Abort instead of auto-installing a missing tool |
 
 ### 13.4 Reports
