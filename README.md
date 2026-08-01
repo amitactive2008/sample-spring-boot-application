@@ -181,26 +181,34 @@ chmod +x kubectl && sudo mv kubectl /usr/local/bin/
 kubectl version --client   # Client Version: v1.3x.x
 ```
 
-### 4.3 Docker
+### 4.3 Podman
 
-kind uses Docker as its container runtime. The `kind-deploy.sh` script builds images
-with `docker build` and loads them with `kind load docker-image`.
+The `kind-deploy.sh` script uses **Podman** as the container runtime. Podman must be
+installed and its machine must be running before executing any `kind` or build commands.
 
 ```bash
-# macOS — install Docker Desktop
-# Linux
-sudo apt install docker.io
-sudo usermod -aG docker $USER   # then log out and back in
+# macOS — install Podman
+brew install podman
 
-docker info   # must succeed without sudo
+# Initialise and start the Podman machine (VM that runs containers)
+podman machine init --cpus 4 --memory 8192 --disk-size 60
+podman machine start
+
+# Verify
+podman info   # must succeed and show running state
+podman machine list   # State: Currently running
 ```
 
-> **Podman users:** kind also supports Podman as a runtime.
-> Set `KIND_EXPERIMENTAL_PROVIDER=podman` before any `kind` command:
-> ```bash
-> export KIND_EXPERIMENTAL_PROVIDER=podman
-> kind create cluster --name issue-app --config kubernetes/environments/kind/kind-cluster.yaml
-> ```
+> **Why Podman and not Docker?**
+> kind v0.24+ supports Podman as a container runtime via the
+> `KIND_EXPERIMENTAL_PROVIDER=podman` environment variable. The `kind-deploy.sh`
+> script sets this automatically. On macOS, Podman runs containers inside an
+> Apple Hypervisor VM and exposes `/var/run/docker.sock` for compatibility.
+
+> **Note on Podman 5+/6+ compatibility:** kind's Podman provider uses `podman ps`
+> with Go template syntax that changed in Podman 5. The script works around this by
+> using `podman save <image> | kind load image-archive /dev/stdin` instead of
+> `kind load docker-image`, which avoids the incompatible codepath.
 
 ### 4.4 kustomize (optional — kubectl has it built in)
 
@@ -225,7 +233,15 @@ brew install kustomize
 
 ## 5. Quick Deploy — One Command
 
-The `kind-deploy.sh` script handles everything end-to-end:
+The `kind-deploy.sh` script handles everything end-to-end.
+
+**Ensure Podman machine is running first:**
+
+```bash
+podman machine start
+```
+
+**Then run the script:**
 
 ```bash
 git clone -b v3-deploy-in-kind \
@@ -240,11 +256,11 @@ What the script does (in order):
 
 | Step | Action |
 |---|---|
-| 1 | Creates kind cluster `issue-app` from `kind-cluster.yaml` |
-| 2 | Installs nginx Ingress Controller and waits for it to be ready |
-| 3 | Builds all 4 Docker images (`docker build`) |
-| 4 | Loads images into kind (`kind load docker-image`) |
-| 5 | Applies the kustomize overlay (`kubectl apply -k kubernetes/environments/kind`) |
+| 1 | Creates kind cluster `issue-app` using `KIND_EXPERIMENTAL_PROVIDER=podman` |
+| 2 | Installs nginx Ingress Controller; waits via `kubectl rollout status` |
+| 3 | Builds all 4 images with `podman build -t localhost/<name>:local` |
+| 4 | Loads images into kind: `podman save <img> \| kind load image-archive /dev/stdin` |
+| 5 | Applies Kustomize overlay: `kubectl kustomize ... --load-restrictor=LoadRestrictionsNone \| kubectl apply -f -` |
 | 6 | Waits for MySQL pod to be ready |
 | 7 | Waits for all application pods to be ready |
 
@@ -264,6 +280,12 @@ When complete:
 ════════════════════════════════════════════════
 ```
 
+**Tear down:**
+
+```bash
+./scripts/kind-deploy.sh teardown
+```
+
 ---
 
 ## 6. Step-by-Step Manual Deploy
@@ -272,7 +294,11 @@ Use this section if you prefer fine-grained control or need to debug individual 
 
 ### 6.1 Create the kind cluster
 
+Set the Podman provider and create the cluster:
+
 ```bash
+export KIND_EXPERIMENTAL_PROVIDER=podman
+
 kind create cluster \
   --name issue-app \
   --config kubernetes/environments/kind/kind-cluster.yaml
@@ -288,66 +314,80 @@ kubectl get nodes                # STATUS: Ready
 kubectl apply -f \
   https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 
-# Wait for the controller pod to be ready (~60 seconds)
-kubectl wait \
-  --namespace ingress-nginx \
-  --for=condition=ready pod \
-  --selector=app.kubernetes.io/component=controller \
-  --timeout=90s
+# Use rollout status — tolerates pods not yet scheduled (unlike kubectl wait)
+kubectl rollout status deployment/ingress-nginx-controller \
+  -n ingress-nginx \
+  --timeout=120s
 
 kubectl get pods -n ingress-nginx   # STATUS: Running
 ```
 
-### 6.3 Build Docker images
+### 6.3 Build images with Podman
+
+Images are tagged with the `localhost/` prefix because Podman qualifies all
+unregistered image names with `localhost/`, and this is what ends up in
+kind's containerd. The kustomization image overrides use the same prefix.
 
 ```bash
-docker build -t auth-service:local    ./auth-service
-docker build -t issue-service:local   ./issue-service
-docker build -t api-gateway:local     ./api-gateway
-docker build -t frontend-service:local ./frontend-service
+podman build -t localhost/auth-service:local     ./auth-service
+podman build -t localhost/issue-service:local    ./issue-service
+podman build -t localhost/api-gateway:local      ./api-gateway
+podman build -t localhost/frontend-service:local ./frontend-service
 ```
-
-> Images tagged `:local` match the `newTag: local` in
-> `kubernetes/environments/kind/kustomization.yaml`.
 
 ### 6.4 Load images into the kind cluster
 
-kind runs Kubernetes inside a Docker container — images on the host are not automatically
-visible inside the cluster. Load them explicitly:
+kind runs inside a Podman container — images in Podman's store are not
+automatically visible inside the cluster. `kind load docker-image` requires
+the Docker CLI; instead pipe through `podman save`:
 
 ```bash
-kind load docker-image auth-service:local    --name issue-app
-kind load docker-image issue-service:local   --name issue-app
-kind load docker-image api-gateway:local     --name issue-app
-kind load docker-image frontend-service:local --name issue-app
+for img in \
+  localhost/api-gateway:local \
+  localhost/auth-service:local \
+  localhost/issue-service:local \
+  localhost/frontend-service:local
+do
+  echo "Loading $img..."
+  podman save "$img" | kind load image-archive /dev/stdin --name issue-app
+done
 ```
 
-Verify images are in the cluster node:
+Verify images are present in the cluster node:
 
 ```bash
-docker exec -it issue-app-control-plane crictl images | grep -E "auth|issue|gateway|frontend"
+podman exec issue-app-control-plane crictl images \
+  | grep -E "auth|issue|gateway|frontend"
+# Expected: localhost/auth-service   local  ...
 ```
 
 ### 6.5 Apply the Kustomize overlay
 
+`kubectl apply -k` is blocked by Kustomize v5 security when patches reference
+files via `../../base/` paths (outside the kustomization root). Use the
+`--load-restrictor=LoadRestrictionsNone` flag instead:
+
 ```bash
 # Preview what will be applied (dry-run)
-kubectl kustomize kubernetes/environments/kind
+kubectl kustomize kubernetes/environments/kind \
+  --load-restrictor=LoadRestrictionsNone
 
 # Apply for real
-kubectl apply -k kubernetes/environments/kind
+kubectl kustomize kubernetes/environments/kind \
+  --load-restrictor=LoadRestrictionsNone \
+  | kubectl apply -f -
 ```
 
 ### 6.6 Wait for pods to become ready
 
 ```bash
-# MySQL must be ready before Spring services start
+# MySQL must be ready before Spring services attempt DB connections
 kubectl wait -n issue-app \
   --for=condition=ready pod \
   --selector=app=mysql \
-  --timeout=120s
+  --timeout=180s
 
-# All services
+# All application services (Spring Boot starts in ~15-20s inside kind)
 for svc in auth-service issue-service api-gateway frontend-service; do
   echo "Waiting for $svc..."
   kubectl wait -n issue-app \
@@ -364,6 +404,18 @@ http://localhost:8080
 ```
 
 Login: `admin@example.com` / `Admin1234!`
+
+**Verify via CLI:**
+
+```bash
+# Gateway health
+curl http://localhost:8080/api/actuator/health
+
+# Admin login
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"Admin1234!"}'
+```
 
 ---
 
