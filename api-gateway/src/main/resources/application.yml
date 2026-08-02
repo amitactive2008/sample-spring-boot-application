@@ -1,0 +1,6 @@
+
+# API GATEWAY - Common YAML Configuration
+
+# Route configuration is defined in profile-specific files:
+#   application-local.yml  -> routes to localhost
+#   application-prod.yml   -> routes to Docker service names

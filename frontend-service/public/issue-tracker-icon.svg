@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Bug icon to match FaBug (simple, bold silhouette) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#3da58a"/>
+      <stop offset="1" stop-color="#1a9a73"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="40" fill="url(#bg)"/>
+  <g transform="translate(40,32)" fill="#ffffff">
+    <!-- body -->
+    <ellipse cx="88" cy="96" rx="44" ry="56" />
+    <!-- head -->
+    <ellipse cx="88" cy="40" rx="26" ry="20" />
+    <!-- antennae -->
+    <path d="M76 18 C66 6, 52 6, 46 18" stroke="#fff" stroke-width="6" fill="none" stroke-linecap="round" />
+    <path d="M100 18 C110 6, 124 6, 130 18" stroke="#fff" stroke-width="6" fill="none" stroke-linecap="round" />
+    <!-- legs left -->
+    <path d="M46 72 C28 60, 24 84, 40 92" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" />
+    <path d="M46 96 C26 92, 26 112, 42 118" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" />
+    <!-- legs right -->
+    <path d="M130 72 C148 60, 152 84, 136 92" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" />
+    <path d="M130 96 C150 92, 150 112, 134 118" stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round" />
+    <!-- center stripe to suggest body separation -->
+    <rect x="84" y="50" width="8" height="88" rx="4" />
+  </g>
+</svg>
