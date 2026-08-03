@@ -1,4 +1,34 @@
-# Issue Tracker — v1 Deployment Guide
+# Issue Tracker
+
+A service-oriented issue tracking application with JWT authentication, role-based user management, issue status history, a React interface, and a Spring Cloud API Gateway.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| `api-gateway/` | Public API entry point and routing on port 8096 |
+| `auth-service/` | Authentication and user management on port 8097 |
+| `issue-service/` | Issue lifecycle management on port 8098 |
+| `frontend-service/` | React browser application |
+| `docs/` | Architecture and local development guides |
+| `security-pipeline.sh` | Optional security and quality checks |
+
+## Start here
+
+- [Architecture and module boundaries](docs/ARCHITECTURE.md)
+- [Local development and verification](docs/DEVELOPMENT.md)
+- [Contribution and Git workflow](CONTRIBUTING.md)
+- [AI contributor instructions](AGENTS.md)
+
+For a complete local environment, create the two MySQL databases, configure the variables shown in `.env.example`, start the auth and issue services, then start the gateway with its `local` profile and run the React frontend. Exact commands are in the [development guide](docs/DEVELOPMENT.md).
+
+Run repository checks with:
+
+```bash
+./scripts/verify.sh all
+```
+
+## Deployment guide
 
 Single-box deployment of the Issue Tracker application: three Spring Boot services behind an
 API Gateway, a React frontend served by Nginx, and MySQL as the database — all running on

@@ -1,0 +1,42 @@
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+
+# Java / Maven output
+**/target/
+*.class
+*.jar
+*.war
+.mvn/timing.properties
+
+# JavaScript output and dependencies
+**/node_modules/
+frontend-service/build/
+**/coverage/
+.eslintcache
+*.tsbuildinfo
+
+# Logs and generated reports
+*.log
+logs/
+reports/
+security-reports/
+.verify/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
