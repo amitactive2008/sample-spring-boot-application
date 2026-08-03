@@ -143,6 +143,18 @@ write_files:
 
       export DEBIAN_FRONTEND=noninteractive
 
+      # ── SSL bypass for corporate proxy environments ─────────────────────────
+      # Corporate proxies do SSL inspection and re-sign traffic with their own CA.
+      # The VM doesn't trust that CA, so verification is disabled for all HTTPS
+      # tools used during provisioning only.
+      echo 'insecure'                            > /etc/curlrc       # curl (all invocations)
+      echo 'strict-ssl=false'                    > /root/.npmrc      # npm
+      git config --global http.sslVerify false                       # git
+      echo 'Acquire::https::Verify-Peer "false";' \
+        > /etc/apt/apt.conf.d/99no-verify                            # apt
+      export MAVEN_OPTS="-Dmaven.wagon.http.ssl.insecure=true \
+        -Dmaven.wagon.http.ssl.allowall=true"                        # Maven
+
       # Install system packages
       apt-get update -qq
       apt-get install -y -qq \
@@ -165,10 +177,6 @@ write_files:
       SQL
 
       # Node.js 20 LTS
-      # The -k flag is needed because corporate SSL inspection proxies
-      # re-sign HTTPS traffic with their own CA, which the VM doesn't trust.
-      # The same bypass is applied to apt so the nodesource repo resolves.
-      echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99no-verify
       curl -fsSLk https://deb.nodesource.com/setup_20.x | bash -
       apt-get install -y nodejs
 
