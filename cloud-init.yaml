@@ -3,7 +3,7 @@ package_update: true
 package_upgrade: false
 
 packages:
-  - openjdk-17-jdk
+  - openjdk-21-jdk
   - maven
   - mysql-server
   - nginx
