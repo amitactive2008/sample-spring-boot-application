@@ -94,7 +94,7 @@ Install the following on the host before proceeding.
 
 | Tool | Version | Install |
 |---|---|---|
-| Java (JDK) | 17 | `sudo apt install openjdk-17-jdk` |
+| Java (JDK) | 21 | `sudo apt install openjdk-21-jdk` |
 | Maven | 3.9+ | `sudo apt install maven` |
 | Node.js | 18 LTS | see below |
 | MySQL | 8.x | `sudo apt install mysql-server` |
@@ -111,7 +111,7 @@ sudo apt install -y nodejs
 **Verify installs:**
 
 ```bash
-java -version        # openjdk 17...
+java -version        # openjdk 21...
 mvn -version         # Apache Maven 3.9...
 node --version       # v18.x.x
 mysql --version      # mysql  Ver 8...
@@ -516,7 +516,7 @@ package_update: true
 package_upgrade: false
 
 packages:
-  - openjdk-17-jdk
+  - openjdk-21-jdk
   - maven
   - mysql-server
   - nginx
@@ -1715,7 +1715,7 @@ jobs:
 
       # 2 & 4. Checkstyle + Build
       - uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin' }
+        with: { java-version: '21', distribution: 'temurin' }
       - name: Build auth-service (checkstyle + package)
         run: ./mvnw clean package -DskipTests -B
         working-directory: auth-service
@@ -2058,7 +2058,7 @@ present on the host.
 
 | Tool | Installed by script if missing |
 |---|---|
-| Java 21 | `apt install openjdk-21-jdk` — required for Spring Boot 4.0.1 services (VM ships with Java 17) |
+| Java 21 | `apt install openjdk-21-jdk` — required for Spring Boot 4.0.1 services |
 | Docker | `get.docker.com` installer — required for SonarQube and ZAP |
 | Gitleaks | Binary downloaded from GitHub Releases |
 | Semgrep | `pip3 install semgrep` |
