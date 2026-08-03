@@ -1709,6 +1709,48 @@ Specific dependency risks in this project:
 4. Store it as an environment variable: `export NVD_API_KEY=<your-key>`
 5. In CI, store it as a secret: `NVD_API_KEY` in GitHub Secrets / Jenkins credentials
 
+**Recommended local workflow — initialize once, then update incrementally:**
+
+The repository includes `scripts/nvd-scan.sh`. It keeps the Dependency-Check database
+in `.security-cache/dependency-check/`, which is excluded from Git. All three Java
+services share this database.
+
+```bash
+# Keep the key in the environment so it is not written to shell history
+export NVD_API_KEY=<your-key>
+
+# First-time initialization. This is the long-running full database download.
+./scripts/nvd-scan.sh init
+
+# Every later scan performs one incremental update, then scans all Java services.
+./scripts/nvd-scan.sh scan
+```
+
+Reports are written under `security-reports/nvd/<timestamp>/`, with separate HTML and
+JSON output for each service. The cache and generated reports are both ignored by Git.
+
+Useful alternatives:
+
+```bash
+# Override the persistent cache location
+NVD_DATA_DIR=/var/cache/dependency-check ./scripts/nvd-scan.sh init
+
+# Scan offline from an already initialized cache, without checking for updates
+./scripts/nvd-scan.sh scan --skip-update
+
+# Show all options
+./scripts/nvd-scan.sh --help
+```
+
+The scan workflow intentionally has a single writer: `update-only` refreshes the shared
+database once, and the three service scans run with `autoUpdate=false`. Dependency-Check
+uses its cache metadata to fetch incremental NVD changes on subsequent updates. Do not
+run multiple update processes against the same local cache concurrently.
+
+The NVD step in `security-pipeline.sh` calls this same helper, so a normal full pipeline
+run also incrementally refreshes and reuses the initialized cache. Use `--skip-nvd` only
+when you deliberately want to omit dependency scanning.
+
 **Step 2 — Add the plugin to each Java service's `pom.xml`:**
 
 Add inside `<build><plugins>` in `auth-service/pom.xml`, `issue-service/pom.xml`,
@@ -1718,10 +1760,10 @@ and `api-gateway/pom.xml`:
 <plugin>
     <groupId>org.owasp</groupId>
     <artifactId>dependency-check-maven</artifactId>
-    <version>10.0.3</version>
+    <version>12.2.2</version>
     <configuration>
         <!-- NVD API key for fast CVE data download -->
-        <nvdApiKey>${env.NVD_API_KEY}</nvdApiKey>
+        <nvdApiKeyEnvironmentVariable>NVD_API_KEY</nvdApiKeyEnvironmentVariable>
 
         <!-- Fail the build if any dependency has CVSS score >= 7 (High/Critical) -->
         <failBuildOnCVSS>7</failBuildOnCVSS>
@@ -1753,10 +1795,11 @@ and `api-gateway/pom.xml`:
 </plugin>
 ```
 
-**Step 3 — Run the scan:**
+**Step 3 — Run a service manually (alternative to the repository script):**
 
 ```bash
-# Run against auth-service (downloads NVD data on first run, ~2-5 min with API key)
+# A direct plugin invocation manages its own update before scanning.
+# Prefer scripts/nvd-scan.sh when scanning all services so the update happens once.
 cd auth-service
 export NVD_API_KEY=<your-key>
 ./mvnw dependency-check:check
@@ -1978,6 +2021,7 @@ Environment variables accepted as alternatives to flags:
 | Variable | Equivalent flag |
 |---|---|
 | `NVD_API_KEY` | `--nvd-key` |
+| `NVD_DATA_DIR` | Persistent Dependency-Check database cache |
 | `SKIP_NVD=true` | `--skip-nvd` |
 | `APP_URL` | `--app-url` |
 | `REPO_DIR` | `--repo` |

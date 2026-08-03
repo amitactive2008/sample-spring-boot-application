@@ -31,6 +31,7 @@
 #
 # Environment variables (alternative to flags):
 #   NVD_API_KEY       NVD API key for dependency-check
+#   NVD_DATA_DIR      Persistent NVD cache (default: <repo>/.security-cache/dependency-check)
 #   SKIP_NVD          Set to true to skip the NVD dependency scan
 #   SONAR_TOKEN       Pre-existing SonarQube token (skips auto-setup)
 #   REPO_DIR          Repository root directory
@@ -58,6 +59,7 @@ REPO_DIR="${REPO_DIR:-/opt/issue-tracker}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REPORT_ROOT="${REPORT_ROOT:-}"
 NVD_API_KEY="${NVD_API_KEY:-}"
+NVD_DATA_DIR="${NVD_DATA_DIR:-}"
 APP_URL="${APP_URL:-http://localhost}"
 SKIP_NVD="${SKIP_NVD:-false}"
 SKIP_SONAR=false
@@ -620,7 +622,8 @@ step_build() {
 # ─────────────────────────────────────────────────────────────────────────────
 step_nvd() {
     local failed=0
-    local dc_plugin="org.owasp:dependency-check-maven:10.0.3:check"
+    local nvd_script="${REPO_DIR}/scripts/nvd-scan.sh"
+    local nvd_data_dir="${NVD_DATA_DIR:-${REPO_DIR}/.security-cache/dependency-check}"
 
     if [[ -z "$NVD_API_KEY" ]]; then
         log_warn "NVD_API_KEY is not set."
@@ -629,21 +632,20 @@ step_nvd() {
         log_warn "Then re-run with: ./security-pipeline.sh --nvd-key <key>"
     fi
 
-    local nvd_opts="-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON"
-    [[ -n "$NVD_API_KEY" ]] && nvd_opts="${nvd_opts} -DnvdApiKey=${NVD_API_KEY}"
+    if [[ ! -x "$nvd_script" ]]; then
+        log_error "NVD scan helper is missing or not executable: ${nvd_script}"
+        return 1
+    fi
 
-    for svc in auth-service issue-service api-gateway; do
-        local report_html="${REPO_DIR}/${svc}/target/dependency-check-report.html"
-        log_info "Scanning ${svc} dependencies..."
-
-        # shellcheck disable=SC2086
-        if mvnw "$svc" "$dc_plugin" $nvd_opts -B --no-transfer-progress 2>&1; then
-            log_ok "${svc}: no CVSS≥7 vulnerabilities"
-        else
-            log_error "${svc}: HIGH/CRITICAL CVEs found — ${report_html}"
-            failed=$(( failed + 1 ))
-        fi
-    done
+    log_info "Updating the shared NVD cache once, then scanning all Java services..."
+    if NVD_API_KEY="$NVD_API_KEY" \
+       NVD_DATA_DIR="$nvd_data_dir" \
+       "$nvd_script" scan --report-dir "${REPORT_DIR}/nvd" 2>&1; then
+        log_ok "Java dependency scans passed"
+    else
+        log_error "One or more Java dependency scans failed — see ${REPORT_DIR}/nvd"
+        failed=$(( failed + 1 ))
+    fi
 
     # npm audit for the React frontend
     local fe_dir="${REPO_DIR}/frontend-service"

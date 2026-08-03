@@ -34,6 +34,7 @@ frontend-service/build/
 logs/
 reports/
 security-reports/
+.security-cache/
 .verify/
 
 # Temporary files
