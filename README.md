@@ -2,7 +2,7 @@
 
 Single-box deployment of the Issue Tracker application: three Spring Boot services behind an
 API Gateway, a React frontend served by Nginx, and MySQL as the database — all running on
-one Linux host (bare metal, VM, or Multipass instance).
+one Linux host (bare metal, VM, or OrbStack instance).
 
 ---
 
@@ -15,7 +15,7 @@ one Linux host (bare metal, VM, or Multipass instance).
 5. [Build All Services](#5-build-all-services)
 6. [Run as systemd Services](#6-run-as-systemd-services)
 7. [Nginx Setup](#7-nginx-setup)
-8. [Automated Multipass Deployment](#8-automated-multipass-deployment)
+8. [Automated OrbStack Deployment](#8-automated-orbstack-deployment)
 9. [Verify the Deployment](#9-verify-the-deployment)
 10. [API Reference](#10-api-reference)
 11. [Troubleshooting](#11-troubleshooting)
@@ -494,269 +494,107 @@ sudo systemctl reload nginx
 
 ---
 
-## 8. Automated Multipass Deployment
+## 8. Automated OrbStack Deployment
 
-If you want a clean, isolated VM with everything provisioned automatically, use
-[Multipass](https://multipass.run) with the provided `cloud-init` file.
+[OrbStack](https://orbstack.dev) is the recommended way to run the Issue Tracker locally on
+macOS. It uses Apple's Virtualization Framework, integrates cleanly with macOS networking
+(VMs are reachable at `<name>.orb.local`), and starts VMs in seconds.
 
-### 8.1 Install Multipass (macOS)
-
-```bash
-brew install --cask multipass
-```
-
-### 8.2 Create `cloud-init.yaml`
-
-Save the following as `cloud-init.yaml`. Edit the credentials under
-`write_files` before running.
-
-```yaml
-#cloud-config
-package_update: true
-package_upgrade: false
-
-packages:
-  - openjdk-21-jdk
-  - maven
-  - mysql-server
-  - nginx
-  - git
-  - curl
-
-write_files:
-
-  - path: /etc/issue-tracker/auth-service.env
-    owner: root:root
-    permissions: '0640'
-    content: |
-      SPRING_PROFILES_ACTIVE=prod
-      SERVER_PORT=8097
-      SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/authdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-      SPRING_DATASOURCE_USERNAME=appuser
-      SPRING_DATASOURCE_PASSWORD=StrongPass@2024!
-      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
-      JWT_EXPIRATIONMINUTES=60
-      APP_ADMIN_EMAIL=admin@example.com
-      APP_ADMIN_PASSWORD=Admin@2024!
-      MAIL_ENABLED=false
-      SES_USERNAME=not-configured
-      SES_PASSWORD=not-configured
-
-  - path: /etc/issue-tracker/issue-service.env
-    owner: root:root
-    permissions: '0640'
-    content: |
-      SPRING_PROFILES_ACTIVE=prod
-      SERVER_PORT=8098
-      SPRING_DATASOURCE_URL=jdbc:mysql://localhost:3306/issuedb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-      SPRING_DATASOURCE_USERNAME=appuser
-      SPRING_DATASOURCE_PASSWORD=StrongPass@2024!
-      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
-      JWT_EXPIRATIONMINUTES=60
-
-  - path: /etc/issue-tracker/api-gateway.env
-    owner: root:root
-    permissions: '0640'
-    content: |
-      SPRING_PROFILES_ACTIVE=local
-      SERVER_PORT=8096
-      JWT_SECRET=ReplaceThisWithASecureSecretKeyOfAtLeast32Chars
-      CORS_ALLOWED_ORIGIN=*
-
-  - path: /etc/systemd/system/auth-service.service
-    content: |
-      [Unit]
-      Description=Issue Tracker - Auth Service (port 8097)
-      After=network.target mysql.service
-      Requires=mysql.service
-      [Service]
-      Type=simple
-      User=issueapp
-      Group=issueapp
-      EnvironmentFile=/etc/issue-tracker/auth-service.env
-      ExecStart=/usr/bin/java -jar /opt/issue-tracker/auth-service/target/auth-service-0.0.1-SNAPSHOT.jar
-      Restart=on-failure
-      RestartSec=15
-      SuccessExitStatus=143
-      StandardOutput=journal
-      StandardError=journal
-      SyslogIdentifier=auth-service
-      [Install]
-      WantedBy=multi-user.target
-
-  - path: /etc/systemd/system/issue-service.service
-    content: |
-      [Unit]
-      Description=Issue Tracker - Issue Service (port 8098)
-      After=network.target mysql.service
-      Requires=mysql.service
-      [Service]
-      Type=simple
-      User=issueapp
-      Group=issueapp
-      EnvironmentFile=/etc/issue-tracker/issue-service.env
-      ExecStart=/usr/bin/java -jar /opt/issue-tracker/issue-service/target/issue-service-0.0.1-SNAPSHOT.jar
-      Restart=on-failure
-      RestartSec=15
-      SuccessExitStatus=143
-      StandardOutput=journal
-      StandardError=journal
-      SyslogIdentifier=issue-service
-      [Install]
-      WantedBy=multi-user.target
-
-  - path: /etc/systemd/system/api-gateway.service
-    content: |
-      [Unit]
-      Description=Issue Tracker - API Gateway (port 8096)
-      After=network.target auth-service.service issue-service.service
-      [Service]
-      Type=simple
-      User=issueapp
-      Group=issueapp
-      EnvironmentFile=/etc/issue-tracker/api-gateway.env
-      ExecStart=/usr/bin/java -jar /opt/issue-tracker/api-gateway/target/api-gateway-0.0.1-SNAPSHOT.jar
-      Restart=on-failure
-      RestartSec=15
-      SuccessExitStatus=143
-      StandardOutput=journal
-      StandardError=journal
-      SyslogIdentifier=api-gateway
-      [Install]
-      WantedBy=multi-user.target
-
-  - path: /etc/nginx/sites-available/issue-tracker
-    content: |
-      server {
-          listen 80 default_server;
-          listen [::]:80 default_server;
-          server_name _;
-          root /opt/issue-tracker/frontend-service/build;
-          index index.html;
-          location /auth/ {
-              proxy_pass http://127.0.0.1:8096;
-              proxy_http_version 1.1;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_read_timeout 60s;
-          }
-          location /issues {
-              proxy_pass http://127.0.0.1:8096;
-              proxy_http_version 1.1;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_read_timeout 60s;
-          }
-          location / {
-              try_files $uri $uri/ /index.html;
-          }
-      }
-
-  - path: /opt/provision.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set -euo pipefail
-      exec > >(tee -a /var/log/issue-tracker-setup.log) 2>&1
-      echo "=== Provisioning started: $(date) ==="
-
-      # Wait for MySQL
-      for i in $(seq 1 30); do
-        mysql -u root -e "SELECT 1;" &>/dev/null && break || sleep 3
-      done
-
-      # Create databases + user
-      mysql -u root <<'SQL'
-      CREATE DATABASE IF NOT EXISTS authdb  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-      CREATE DATABASE IF NOT EXISTS issuedb CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-      CREATE USER IF NOT EXISTS 'appuser'@'localhost' IDENTIFIED BY 'StrongPass@2024!';
-      GRANT ALL PRIVILEGES ON authdb.*  TO 'appuser'@'localhost';
-      GRANT ALL PRIVILEGES ON issuedb.* TO 'appuser'@'localhost';
-      FLUSH PRIVILEGES;
-      SQL
-
-      # Node.js 18
-      curl -fsSL https://deb.nodesource.com/setup_18.x | bash - >/dev/null 2>&1
-      apt-get install -y nodejs >/dev/null 2>&1
-
-      # Clone
-      git clone --branch v1 --depth 1 \
-        https://github.com/amitactive2008/sample-spring-boot-application.git \
-        /opt/issue-tracker
-
-      # Maven builds
-      mvn -f /opt/issue-tracker/auth-service/pom.xml  clean package -DskipTests -q
-      mvn -f /opt/issue-tracker/issue-service/pom.xml clean package -DskipTests -q
-      mvn -f /opt/issue-tracker/api-gateway/pom.xml   clean package -DskipTests -q
-
-      # React build
-      cd /opt/issue-tracker/frontend-service
-      REACT_APP_API_BASE_URL="" npm install --silent
-      REACT_APP_API_BASE_URL="" npm run build
-
-      # System user + permissions
-      useradd --system --no-create-home --shell /usr/sbin/nologin issueapp 2>/dev/null || true
-      chown -R issueapp:issueapp /opt/issue-tracker
-      chgrp issueapp /etc/issue-tracker/*.env
-
-      # Nginx
-      rm -f /etc/nginx/sites-enabled/default
-      ln -sf /etc/nginx/sites-available/issue-tracker /etc/nginx/sites-enabled/issue-tracker
-      nginx -t && systemctl enable --now nginx && systemctl reload nginx
-
-      # Spring Boot services
-      systemctl daemon-reload
-      systemctl enable auth-service issue-service api-gateway
-      systemctl start auth-service && sleep 20
-      systemctl start issue-service && sleep 10
-      systemctl start api-gateway
-
-      echo "=== Provisioning complete: $(date) ==="
-      echo "Frontend: http://$(hostname -I | awk '{print $1}')/"
-
-runcmd:
-  - /opt/provision.sh
-```
-
-### 8.3 Launch the VM
+### 8.1 Install OrbStack (macOS)
 
 ```bash
-multipass launch \
-  --name issue-tracker-v1 \
+brew install --cask orbstack
+```
+
+Or download the app from https://orbstack.dev and follow the guided setup.
+
+### 8.2 Create the VM
+
+From the repository root (where `cloud-init.yaml` lives):
+
+```bash
+orbctl create \
   --cpus 2 \
   --memory 4G \
   --disk 20G \
-  --cloud-init cloud-init.yaml \
-  22.04
+  --user-data cloud-init.yaml \
+  ubuntu:22.04 \
+  issue-tracker-v1
 ```
 
-> The `multipass launch` command waits for cloud-init to finish.
-> Total time is approximately **20–30 minutes** (Maven and npm dependency downloads).
+OrbStack creates the VM and immediately begins cloud-init provisioning in the background.
+The command returns as soon as the VM boots — provisioning continues inside the VM.
 
-### 8.4 Get the VM IP
+> Total provisioning time is approximately **20–30 minutes** (Maven and npm downloads).
+> The VM is reachable via SSH straight away; provisioning runs in the background.
+
+### 8.3 Follow provisioning progress
 
 ```bash
-multipass info issue-tracker-v1
-# look for IPv4: 192.168.x.x
+# Watch the provisioning log in real time
+orbctl run -m issue-tracker-v1 -- sudo tail -f /var/log/issue-tracker-setup.log
+
+# Or open a shell and tail from inside
+orbctl ssh issue-tracker-v1
+sudo tail -f /var/log/issue-tracker-setup.log
 ```
 
-### 8.5 Useful Multipass commands
+Provisioning is complete when the log prints:
+
+```
+=== Provisioning complete: <timestamp> ===
+Frontend: http://issue-tracker-v1.orb.local/
+```
+
+### 8.4 Access the VM
 
 ```bash
-# Open a shell in the VM
-multipass shell issue-tracker-v1
+# SSH shell
+orbctl ssh issue-tracker-v1
+
+# Or using the auto-configured hostname (no IP lookup needed)
+ssh <your-macos-username>@issue-tracker-v1.orb.local
+```
+
+### 8.5 Get the VM IP
+
+```bash
+orbctl info issue-tracker-v1
+# look for: IP addresses: 198.19.x.x
+```
+
+The `.orb.local` hostname is always available from the Mac host and is easier to use than
+the raw IP.
+
+### 8.6 Open the application
+
+Once provisioning is complete, open a browser and navigate to:
+
+```
+http://issue-tracker-v1.orb.local/
+```
+
+Login with the seeded admin account: `admin@example.com` / `Admin@2024!`
+
+### 8.7 Useful OrbStack commands
+
+```bash
+# Open a shell
+orbctl ssh issue-tracker-v1
+
+# Run a one-off command
+orbctl run -m issue-tracker-v1 -- systemctl is-active auth-service issue-service api-gateway nginx
 
 # Follow the provisioning log
-multipass exec issue-tracker-v1 -- tail -f /var/log/issue-tracker-setup.log
+orbctl run -m issue-tracker-v1 -- sudo tail -f /var/log/issue-tracker-setup.log
 
 # Stop / Start / Delete
-multipass stop   issue-tracker-v1
-multipass start  issue-tracker-v1
-multipass delete issue-tracker-v1 && multipass purge
+orbctl stop   issue-tracker-v1
+orbctl start  issue-tracker-v1
+orbctl delete issue-tracker-v1
+
+# Copy a file to the VM
+orbctl push security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
 ```
 
 ---
@@ -771,8 +609,8 @@ Replace `<HOST>` with the server IP or `localhost`.
 # All four services should show "active (running)"
 systemctl is-active auth-service issue-service api-gateway nginx
 
-# Or on the Multipass VM:
-multipass exec issue-tracker-v1 -- \
+# Or from the Mac host via OrbStack:
+orbctl run -m issue-tracker-v1 -- \
   systemctl is-active auth-service issue-service api-gateway nginx
 ```
 
@@ -949,10 +787,10 @@ sudo mysql -u root -e "DROP DATABASE authdb; DROP DATABASE issuedb;"
 sudo systemctl restart auth-service
 ```
 
-### Provisioning log (Multipass)
+### Provisioning log (OrbStack)
 
 ```bash
-multipass exec issue-tracker-v1 -- sudo cat /var/log/issue-tracker-setup.log
+orbctl run -m issue-tracker-v1 -- sudo cat /var/log/issue-tracker-setup.log
 ```
 
 ---
@@ -2025,7 +1863,7 @@ upgrade to.
 ## 13. Automated Pipeline Script — `security-pipeline.sh`
 
 `security-pipeline.sh` runs all nine checks from Section 12 in the correct order
-with a single command. It is designed to run directly on the Multipass VM
+with a single command. It is designed to run directly on the OrbStack VM
 (`issue-tracker-v1`) or any Linux host where the repository is deployed.
 
 ### 13.1 What it does
@@ -2076,15 +1914,15 @@ The script lives at the repository root as `security-pipeline.sh`.
 After cloning or pulling the latest code on the VM it is already present:
 
 ```bash
-multipass shell issue-tracker-v1
+orbctl ssh issue-tracker-v1
 chmod +x /opt/issue-tracker/security-pipeline.sh
 ```
 
 To copy it manually from the host machine:
 
 ```bash
-multipass transfer security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
-multipass exec issue-tracker-v1 -- chmod +x /opt/issue-tracker/security-pipeline.sh
+orbctl push security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
+orbctl run -m issue-tracker-v1 -- chmod +x /opt/issue-tracker/security-pipeline.sh
 ```
 
 ### 13.4 Usage

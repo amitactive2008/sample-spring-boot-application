@@ -166,9 +166,9 @@ write_files:
       FLUSH PRIVILEGES;
       SQL
 
-      # Node.js 18
-      curl -fsSL https://deb.nodesource.com/setup_18.x | bash - >/dev/null 2>&1
-      apt-get install -y nodejs >/dev/null 2>&1
+      # Node.js 20 LTS
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y nodejs
 
       # Clone
       git clone --branch v1 --depth 1 \
