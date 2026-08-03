@@ -165,7 +165,11 @@ write_files:
       SQL
 
       # Node.js 20 LTS
-      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      # The -k flag is needed because corporate SSL inspection proxies
+      # re-sign HTTPS traffic with their own CA, which the VM doesn't trust.
+      # The same bypass is applied to apt so the nodesource repo resolves.
+      echo 'Acquire::https::Verify-Peer "false";' > /etc/apt/apt.conf.d/99no-verify
+      curl -fsSLk https://deb.nodesource.com/setup_20.x | bash -
       apt-get install -y nodejs
 
       # Clone
