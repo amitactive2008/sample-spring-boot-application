@@ -20,18 +20,22 @@
 #   ./security-pipeline.sh [OPTIONS]
 #
 # Options:
+#   --skip-nvd        Skip step 12.9 (avoids the slow initial NVD database download)
 #   --skip-sonar      Skip steps 12.7 and 12.8 (no Docker needed)
 #   --skip-dast       Skip step 12.5  (requires running app + Docker)
 #   --skip-install    Abort if a tool is missing instead of installing it
 #   --nvd-key KEY     NVD API key (or set NVD_API_KEY env var)
 #   --app-url URL     App URL for DAST scan (default: http://localhost)
 #   --repo DIR        Repository root (default: /opt/issue-tracker)
+#   --report-root DIR Report parent directory (default: <repo>/security-reports)
 #
 # Environment variables (alternative to flags):
 #   NVD_API_KEY       NVD API key for dependency-check
+#   SKIP_NVD          Set to true to skip the NVD dependency scan
 #   SONAR_TOKEN       Pre-existing SonarQube token (skips auto-setup)
 #   REPO_DIR          Repository root directory
 #   APP_URL           Target URL for DAST scan
+#   REPORT_ROOT       Parent directory for timestamped reports
 #
 # Examples:
 #   # Full pipeline (installs missing tools, interactive prompts for SonarQube)
@@ -52,9 +56,10 @@ set -uo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 REPO_DIR="${REPO_DIR:-/opt/issue-tracker}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-REPORT_DIR="/tmp/pipeline-reports/${TIMESTAMP}"
+REPORT_ROOT="${REPORT_ROOT:-}"
 NVD_API_KEY="${NVD_API_KEY:-}"
 APP_URL="${APP_URL:-http://localhost}"
+SKIP_NVD="${SKIP_NVD:-false}"
 SKIP_SONAR=false
 SKIP_DAST=false
 SKIP_INSTALL=false
@@ -73,16 +78,21 @@ JAVA21_HOME=""   # resolved in setup_java21()
 # ─────────────────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --skip-nvd)     SKIP_NVD=true;          shift ;;
         --skip-sonar)   SKIP_SONAR=true;        shift ;;
         --skip-dast)    SKIP_DAST=true;          shift ;;
         --skip-install) SKIP_INSTALL=true;       shift ;;
         --nvd-key)      NVD_API_KEY="$2";        shift 2 ;;
         --app-url)      APP_URL="$2";            shift 2 ;;
         --repo)         REPO_DIR="$2";           shift 2 ;;
+        --report-root)  REPORT_ROOT="$2";        shift 2 ;;
         -h|--help)      sed -n '2,50p' "$0"; exit 0 ;;
         *)              echo "Unknown option: $1 (use --help)"; exit 1 ;;
     esac
 done
+
+REPORT_ROOT="${REPORT_ROOT:-${REPO_DIR}/security-reports}"
+REPORT_DIR="${REPORT_ROOT}/${TIMESTAMP}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLORS
@@ -249,6 +259,7 @@ setup_java21() {
     # Find an existing Java 21 installation first
     local candidate
     for candidate in \
+            /usr/lib/jvm/java-21-openjdk-arm64 \
             /usr/lib/jvm/java-21-openjdk-amd64 \
             /usr/lib/jvm/java-21-openjdk \
             /usr/lib/jvm/temurin-21; do
@@ -331,34 +342,43 @@ setup_tools() {
     # ── System packages (apt) ──────────────────────────────────────────────
     install_if_missing "jq" \
         "command -v jq" \
-        "sudo apt-get install -y jq -qq"
+        "sudo apt-get install -y jq -qq" || return 1
 
     install_if_missing "pip3" \
         "command -v pip3" \
-        "sudo apt-get install -y python3-pip -qq"
+        "sudo apt-get install -y python3-pip -qq" || return 1
 
     install_if_missing "Node.js 18 / npm" \
         "command -v npm" \
         'curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - -qq
-         sudo apt-get install -y nodejs -qq'
+         sudo apt-get install -y nodejs -qq' || return 1
 
     install_if_missing "Docker" \
         "command -v docker" \
-        "curl -fsSL https://get.docker.com | sudo sh -s -- -q"
+        'if ! curl -fsSL https://get.docker.com | sudo sh -s -- -q; then
+             echo "Official Docker installer unavailable; using Ubuntu docker.io"
+             sudo apt-get update -qq
+             sudo apt-get install -y docker.io -qq
+         fi' || return 1
 
     # ── Gitleaks (binary release) ──────────────────────────────────────────
     install_if_missing "gitleaks" \
         "command -v gitleaks" \
-        'GL_VER=$(curl -sf https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
+        'case "$(uname -m)" in
+             arm64|aarch64) GL_ARCH=arm64 ;;
+             x86_64|amd64)  GL_ARCH=x64 ;;
+             *) echo "Unsupported Gitleaks architecture: $(uname -m)"; exit 1 ;;
+         esac
+         GL_VER=$(curl -sf https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
              | jq -r .tag_name | tr -d v)
-         curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+         curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" \
            | sudo tar -xz -C /usr/local/bin gitleaks
-         sudo chmod +x /usr/local/bin/gitleaks'
+         sudo chmod +x /usr/local/bin/gitleaks' || return 1
 
     # ── Semgrep ────────────────────────────────────────────────────────────
     install_if_missing "semgrep" \
         "command -v semgrep" \
-        "pip3 install semgrep --quiet"
+        "pip3 install semgrep --quiet" || return 1
 
     log_info ""
     log_ok "All tools ready — starting pipeline"
@@ -399,7 +419,10 @@ TOML
 
     log_info "Scanning full git history for secrets..."
 
-    if gitleaks detect \
+    if GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0=safe.directory \
+        GIT_CONFIG_VALUE_0="$REPO_DIR" \
+        gitleaks detect \
         --source    "$REPO_DIR" \
         --config    "${REPORT_DIR}/.gitleaks.toml" \
         --report-format json \
@@ -627,7 +650,7 @@ step_nvd() {
     if command -v npm &>/dev/null && [[ -d "$fe_dir" ]]; then
         log_info "npm audit — frontend..."
         cd "$fe_dir"
-        [[ ! -d node_modules ]] && npm install --silent 2>&1 | tail -3
+        [[ ! -x node_modules/.bin/eslint ]] && npm ci 2>&1 | tail -10
         if npm audit --audit-level=high 2>&1; then
             log_ok "frontend: npm audit passed (no high/critical)"
         else
@@ -651,7 +674,7 @@ step_lint() {
     if command -v npm &>/dev/null && [[ -d "$fe_dir" ]]; then
         log_info "ESLint — React frontend..."
         cd "$fe_dir"
-        [[ ! -d node_modules ]] && npm install --silent 2>&1 | tail -3
+        [[ ! -x node_modules/.bin/eslint ]] && npm ci 2>&1 | tail -10
         if npm run lint 2>&1; then
             log_ok "ESLint: passed"
         else
@@ -898,24 +921,56 @@ step_dast() {
 
     local html_report="${REPORT_DIR}/zap-report.html"
     local json_report="${REPORT_DIR}/zap-report.json"
+    local zap_work="${REPORT_DIR}/zap-work"
+
+    # The official image runs as an unprivileged user. Give it a dedicated
+    # writable mount instead of relaxing permissions on the whole report tree.
+    mkdir -p "$zap_work"
+    chmod 0777 "$zap_work"
 
     log_info "Running ZAP baseline scan (passive — no active attacks)..."
     log_info "Target: ${APP_URL}"
 
+    # Avoid running two memory-intensive security platforms concurrently.
+    local sonar_was_running=false
+    if sudo docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^sonarqube$'; then
+        sonar_was_running=true
+        log_info "Stopping SonarQube temporarily while ZAP runs..."
+        sudo docker stop sonarqube >/dev/null
+    fi
+
     # --network host so ZAP can reach localhost inside the VM
-    if sudo docker run --rm \
+    local zap_rc=0
+    sudo docker run --rm \
         --network host \
-        -v "${REPORT_DIR}:/zap/wrk:rw" \
+        -v "${zap_work}:/zap/wrk:rw" \
         ghcr.io/zaproxy/zaproxy:stable \
         zap-baseline.py \
             -t "${APP_URL}/" \
             -r "zap-report.html" \
             -J "zap-report.json" \
             -l WARN \
-            -I 2>&1; then                 # -I: don't fail on warnings
+            -I 2>&1 || zap_rc=$?          # -I: don't fail on warnings
+
+    [[ -f "${zap_work}/zap-report.html" ]] && cp "${zap_work}/zap-report.html" "$html_report"
+    [[ -f "${zap_work}/zap-report.json" ]] && cp "${zap_work}/zap-report.json" "$json_report"
+    chmod 0755 "$zap_work"
+
+    if [[ "$sonar_was_running" == "true" ]]; then
+        log_info "Restarting SonarQube after ZAP..."
+        sudo docker start sonarqube >/dev/null
+    fi
+
+    if [[ $zap_rc -eq 0 ]]; then
         log_ok "ZAP scan complete — report: ${html_report}"
         return 0
     else
+        if [[ ! -f "$json_report" ]]; then
+            log_error "ZAP exited with code ${zap_rc} before generating its JSON report"
+            log_error "See ${REPORT_DIR}/dast.log for scanner diagnostics"
+            return 1
+        fi
+
         # ZAP exits non-zero when it finds alerts at WARN level or above
         local medium_plus
         medium_plus=$(jq '[.site[].alerts[] | select(.riskcode | tonumber >= 2)] | length' \
@@ -1009,6 +1064,7 @@ main() {
     log_banner "Security & Code Quality Pipeline — Issue Tracker v1"
     echo -e "  ${DIM}Repository : ${REPO_DIR}${NC}"
     echo -e "  ${DIM}Started    : $(date)${NC}"
+    [[ "$SKIP_NVD"   == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  NVD Check: SKIPPED (initialization deferred)"
     [[ "$SKIP_SONAR" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  SonarQube + Quality Gate: SKIPPED"
     [[ "$SKIP_DAST"  == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  DAST: SKIPPED"
     echo ""
@@ -1041,7 +1097,9 @@ main() {
     [[ "$(get_step_status build)" == "PASS" ]] && build_ok=true
 
     # ── 12.9 NVD Check ───────────────────────────────────────────────────
-    if $build_ok; then
+    if [[ "$SKIP_NVD" == "true" ]]; then
+        skip_step "nvd" "--skip-nvd flag or SKIP_NVD=true set"
+    elif $build_ok; then
         run_step "nvd"
     else
         skip_step "nvd" "Maven Build failed — no artifacts to scan"

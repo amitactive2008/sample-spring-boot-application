@@ -1964,27 +1964,34 @@ orbctl run -m issue-tracker-v1 sudo chmod +x /opt/issue-tracker/security-pipelin
 | Option | Description |
 |---|---|
 | _(no options)_ | Full pipeline — installs missing tools, runs all 9 steps |
+| `--skip-nvd` | Skip NVD dependency scanning, including the slow initial database download |
 | `--skip-sonar` | Skip SonarQube (12.7) and Quality Gate (12.8) — no Docker needed |
 | `--skip-dast` | Skip ZAP scan (12.5) — use when the app is not running |
 | `--skip-install` | Abort instead of auto-installing a missing tool |
 | `--nvd-key KEY` | NVD API key for faster dependency scanning |
 | `--app-url URL` | Base URL for the DAST scan (default: `http://localhost`) |
 | `--repo DIR` | Repository root directory (default: `/opt/issue-tracker`) |
+| `--report-root DIR` | Parent directory for reports (default: `<repo>/security-reports`) |
 
 Environment variables accepted as alternatives to flags:
 
 | Variable | Equivalent flag |
 |---|---|
 | `NVD_API_KEY` | `--nvd-key` |
+| `SKIP_NVD=true` | `--skip-nvd` |
 | `APP_URL` | `--app-url` |
 | `REPO_DIR` | `--repo` |
 | `SONAR_TOKEN` | Pre-existing SonarQube token (skips auto token generation) |
+| `REPORT_ROOT` | `--report-root` |
 
 **Examples:**
 
 ```bash
 # Full pipeline (installs any missing tools automatically)
 ./security-pipeline.sh
+
+# Run every check except NVD while its initial database setup is deferred
+./security-pipeline.sh --skip-nvd
 
 # Fastest run — skip the two Docker-dependent steps
 ./security-pipeline.sh --skip-sonar --skip-dast
@@ -2047,10 +2054,11 @@ sudo systemctl start auth-service issue-service api-gateway nginx
 
 ### 13.7 Reports
 
-Every run creates a timestamped directory under `/tmp/pipeline-reports/`:
+Every run creates a persistent timestamped directory under
+`<repo>/security-reports/` by default:
 
 ```
-/tmp/pipeline-reports/20260801-143022/
+security-reports/20260801-143022/
 ├── pipeline.log            ← combined log of all steps
 ├── .gitleaks.toml          ← allowlist used during the scan
 ├── gitleaks.log
@@ -2098,7 +2106,7 @@ The script prints colour-coded progress and ends with a summary table:
 ╠════════════════════════════════════════════════════════════╣
 ║  ALL CHECKS PASSED — safe to merge and deploy              ║
 ║  Pass: 9  Fail: 0  Skip: 0  Total: 633s                   ║
-║  Reports: /tmp/pipeline-reports/20260801-143022            ║
+║  Reports: /opt/issue-tracker/security-reports/20260801-143022 ║
 ╚════════════════════════════════════════════════════════════╝
 ```
 
