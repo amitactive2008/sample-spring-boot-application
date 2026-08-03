@@ -39,7 +39,7 @@ controller -> service -> repository -> entity
 
 ## Security boundary
 
-The auth service issues HMAC-signed JWTs. The gateway and both domain services must receive the same `JWT_SECRET`. The gateway is the public API entry point, but each service also enforces authorization so direct network access does not bypass security.
+The auth service issues HS256-signed JWTs. The gateway and both domain services must receive the same `JWT_SECRET`. The gateway is the public API entry point, but each service also enforces authorization so direct network access does not bypass security.
 
 Never store a real JWT secret or database password in source control. Use deployment environment variables.
 
@@ -50,4 +50,3 @@ Never store a real JWT secret or database password in source control. Use deploy
 - Cross-origin policy and route changes belong in `api-gateway`.
 - UI state and HTTP client calls belong in `frontend-service`; keep requests in `src/api/`.
 - Changes to an HTTP contract should update its DTO, controller/service tests, frontend API client, and documentation together.
-

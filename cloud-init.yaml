@@ -149,7 +149,6 @@ write_files:
       # tools used during provisioning only.
       echo 'insecure'                            > /etc/curlrc       # curl (all invocations)
       echo 'strict-ssl=false'                    > /root/.npmrc      # npm
-      git config --global http.sslVerify false                       # git
       echo 'Acquire::https::Verify-Peer "false";' \
         > /etc/apt/apt.conf.d/99no-verify                            # apt
       export MAVEN_OPTS="-Dmaven.wagon.http.ssl.insecure=true \
@@ -158,7 +157,15 @@ write_files:
       # Install system packages
       apt-get update -qq
       apt-get install -y -qq \
-        openjdk-21-jdk maven mysql-server nginx git curl
+        openjdk-21-jdk maven mysql-server nginx git curl openssl
+      git config --global http.sslVerify false
+
+      # Replace the committed placeholder with one shared random signing key.
+      jwt_secret="$(openssl rand -hex 32)"
+      sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${jwt_secret}/" \
+        /etc/issue-tracker/auth-service.env \
+        /etc/issue-tracker/issue-service.env \
+        /etc/issue-tracker/api-gateway.env
 
       # Start MySQL and wait until it accepts connections
       systemctl enable --now mysql
@@ -192,7 +199,7 @@ write_files:
 
       # React build
       cd /opt/issue-tracker/frontend-service
-      REACT_APP_API_BASE_URL="" npm install --silent
+      REACT_APP_API_BASE_URL="" npm ci
       REACT_APP_API_BASE_URL="" npm run build
 
       # System user + permissions

@@ -562,7 +562,7 @@ The command returns as soon as the VM boots — provisioning continues inside th
 
 ```bash
 # Watch the provisioning log in real time
-orbctl run -m issue-tracker-v1 -- sudo tail -f /var/log/issue-tracker-setup.log
+orbctl run -m issue-tracker-v1 sudo tail -f /var/log/issue-tracker-setup.log
 
 # Or open a shell and tail from inside
 orbctl ssh issue-tracker-v1
@@ -613,10 +613,10 @@ Login with the seeded admin account: `admin@example.com` / `Admin@2024!`
 orbctl ssh issue-tracker-v1
 
 # Run a one-off command
-orbctl run -m issue-tracker-v1 -- systemctl is-active auth-service issue-service api-gateway nginx
+orbctl run -m issue-tracker-v1 systemctl is-active auth-service issue-service api-gateway nginx
 
 # Follow the provisioning log
-orbctl run -m issue-tracker-v1 -- sudo tail -f /var/log/issue-tracker-setup.log
+orbctl run -m issue-tracker-v1 sudo tail -f /var/log/issue-tracker-setup.log
 
 # Stop / Start / Delete
 orbctl stop   issue-tracker-v1
@@ -624,7 +624,7 @@ orbctl start  issue-tracker-v1
 orbctl delete issue-tracker-v1
 
 # Copy a file to the VM
-orbctl push security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
+orbctl run -m issue-tracker-v1 -p sudo cp "$PWD/security-pipeline.sh" /opt/issue-tracker/security-pipeline.sh
 ```
 
 ---
@@ -640,7 +640,7 @@ Replace `<HOST>` with the server IP or `localhost`.
 systemctl is-active auth-service issue-service api-gateway nginx
 
 # Or from the Mac host via OrbStack:
-orbctl run -m issue-tracker-v1 -- \
+orbctl run -m issue-tracker-v1 \
   systemctl is-active auth-service issue-service api-gateway nginx
 ```
 
@@ -820,7 +820,7 @@ sudo systemctl restart auth-service
 ### Provisioning log (OrbStack)
 
 ```bash
-orbctl run -m issue-tracker-v1 -- sudo cat /var/log/issue-tracker-setup.log
+orbctl run -m issue-tracker-v1 sudo cat /var/log/issue-tracker-setup.log
 ```
 
 ---
@@ -1951,8 +1951,8 @@ chmod +x /opt/issue-tracker/security-pipeline.sh
 To copy it manually from the host machine:
 
 ```bash
-orbctl push security-pipeline.sh issue-tracker-v1:/opt/issue-tracker/security-pipeline.sh
-orbctl run -m issue-tracker-v1 -- chmod +x /opt/issue-tracker/security-pipeline.sh
+orbctl run -m issue-tracker-v1 -p sudo cp "$PWD/security-pipeline.sh" /opt/issue-tracker/security-pipeline.sh
+orbctl run -m issue-tracker-v1 sudo chmod +x /opt/issue-tracker/security-pipeline.sh
 ```
 
 ### 13.4 Usage

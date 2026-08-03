@@ -28,7 +28,8 @@ public class JwtService {
                 .claim("role", role)
                 .issuedAt(now)
                 .expiration(expiry)
-                .signWith(key)
+                // Keep the algorithm explicit so every service validates the same contract.
+                .signWith(key, Jwts.SIG.HS256)
                 .compact();
     }
 }
