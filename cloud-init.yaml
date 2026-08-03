@@ -1,14 +1,4 @@
 #cloud-config
-package_update: true
-package_upgrade: false
-
-packages:
-  - openjdk-21-jdk
-  - maven
-  - mysql-server
-  - nginx
-  - git
-  - curl
 
 write_files:
 
@@ -151,7 +141,15 @@ write_files:
       exec > >(tee -a /var/log/issue-tracker-setup.log) 2>&1
       echo "=== Provisioning started: $(date) ==="
 
-      # Wait for MySQL
+      export DEBIAN_FRONTEND=noninteractive
+
+      # Install system packages
+      apt-get update -qq
+      apt-get install -y -qq \
+        openjdk-21-jdk maven mysql-server nginx git curl
+
+      # Start MySQL and wait until it accepts connections
+      systemctl enable --now mysql
       for i in $(seq 1 30); do
         mysql -u root -e "SELECT 1;" &>/dev/null && break || sleep 3
       done
@@ -203,7 +201,7 @@ write_files:
       systemctl start api-gateway
 
       echo "=== Provisioning complete: $(date) ==="
-      echo "Frontend: http://$(hostname -I | awk '{print $1}')/"
+      echo "Frontend: http://issue-tracker-v1.orb.local/"
 
 runcmd:
   - /opt/provision.sh
