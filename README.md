@@ -238,7 +238,7 @@ JWT_SECRET=MyIssueTrackerJWTSecretKey2024!!
 
 # ── Default admin user seeded on first startup ─────────────────
 APP_ADMIN_EMAIL=admin@example.com
-APP_ADMIN_PASSWORD=Admin@2024!
+APP_ADMIN_PASSWORD=Admin1234!
 ```
 
 > **Never commit `.env` to git.** It is already listed in `.gitignore`. Verify with:
@@ -392,7 +392,7 @@ podman run -d \
   -e SPRING_DATASOURCE_PASSWORD=Str0ngDB@2024! \
   -e JWT_SECRET=MyIssueTrackerJWTSecretKey2024!! \
   -e APP_ADMIN_EMAIL=admin@example.com \
-  -e APP_ADMIN_PASSWORD=Admin@2024! \
+  -e APP_ADMIN_PASSWORD=Admin1234! \
   -e MAIL_ENABLED=false \
   -e SES_USERNAME=disabled \
   -e SES_PASSWORD=disabled \
@@ -535,7 +535,7 @@ curl -s -X POST http://<HOST>:8096/auth/register \
 # 2. Login — capture JWT
 TOKEN=$(curl -s -X POST http://<HOST>:8096/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"Admin@2024!"}' \
+  -d '{"email":"admin@example.com","password":"Admin1234!"}' \
   | jq -r '.accessToken')
 
 echo "Token: ${TOKEN:0:40}..."
@@ -556,6 +556,27 @@ curl -s http://<HOST>:8096/issues \
 Navigate to `http://<HOST>:3000` in a browser.
 
 Login with `APP_ADMIN_EMAIL` / `APP_ADMIN_PASSWORD` from your `.env`.
+
+The admin is inserted only when that email does not already exist. Changing
+`APP_ADMIN_PASSWORD` later does not replace the password stored in the persistent MySQL
+volume. If login fails, first test the exact values from the `.env` that was present on the
+first startup and confirm the seed message:
+
+```bash
+podman logs issue-app-auth 2>&1 | grep "Default ADMIN user created"
+```
+
+For a new development installation with no data to preserve, reset the database and seed
+the current `.env` credentials again:
+
+```bash
+# Destructive: deletes every database row in the Compose MySQL volume.
+podman-compose down -v
+podman-compose up --build -d
+```
+
+See [Full reset — wipe database](#122-full-reset--wipe-database) before using this on a
+database containing data you need.
 
 ---
 
@@ -1589,7 +1610,7 @@ done
 # Get a token for authenticated DAST
 TOKEN=$(curl -s -X POST http://localhost:8096/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"Admin@2024!"}' \
+  -d '{"email":"admin@example.com","password":"Admin1234!"}' \
   | jq -r '.accessToken')
 
 # Baseline scan (safe, passive)
