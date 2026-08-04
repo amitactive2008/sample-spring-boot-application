@@ -91,9 +91,13 @@ kubectl config use-context "kind-${CLUSTER_NAME}"
 
 # ── 2. Install nginx ingress controller ───────────────────────────────────────
 info "Installing nginx ingress controller..."
-helm install ingress-nginx ./ingress-nginx \
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+
+helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
   -f scripts/values.yaml \
-  --namespace ingress-nginx --create-namespace
+  --namespace ingress-nginx \
+  --create-namespace
 
 # Use rollout status — tolerates the pods not yet being scheduled
 info "Waiting for nginx ingress controller to become ready (up to 120s)..."
