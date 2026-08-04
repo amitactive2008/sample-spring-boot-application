@@ -1,11 +1,19 @@
 import React from 'react';
 import { Formik, Form } from 'formik';
 
-const BasicForm = ({ initialValues, validationSchema, onSubmit, children, enableReinitialize = false }) => {
+const BasicForm = ({
+  initialValues,
+  validationSchema,
+  validate,
+  onSubmit,
+  children,
+  enableReinitialize = false,
+}) => {
   return (
     <Formik
       initialValues={initialValues}
       validationSchema={validationSchema}
+      validate={validate}
       onSubmit={onSubmit}
       validateOnChange={true}
       validateOnBlur={true}

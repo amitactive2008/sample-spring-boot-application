@@ -137,28 +137,39 @@ write_files:
     permissions: '0755'
     content: |
       #!/bin/bash
-      set -euo pipefail
+      set -Eeuo pipefail
       exec > >(tee -a /var/log/issue-tracker-setup.log) 2>&1
+      trap 'status=$?; echo "=== Provisioning failed at line ${LINENO} (exit ${status}): ${BASH_COMMAND} ==="; exit "${status}"' ERR
       echo "=== Provisioning started: $(date) ==="
 
       export DEBIAN_FRONTEND=noninteractive
+      export HOME=/root
 
-      # ── SSL bypass for corporate proxy environments ─────────────────────────
-      # Corporate proxies do SSL inspection and re-sign traffic with their own CA.
-      # The VM doesn't trust that CA, so verification is disabled for all HTTPS
-      # tools used during provisioning only.
-      echo 'insecure'                            > /etc/curlrc       # curl (all invocations)
-      echo 'strict-ssl=false'                    > /root/.npmrc      # npm
-      echo 'Acquire::https::Verify-Peer "false";' \
-        > /etc/apt/apt.conf.d/99no-verify                            # apt
-      export MAVEN_OPTS="-Dmaven.wagon.http.ssl.insecure=true \
-        -Dmaven.wagon.http.ssl.allowall=true"                        # Maven
+      # Remove insecure settings left by older versions of this provisioner.
+      rm -f /etc/curlrc /root/.npmrc /etc/apt/apt.conf.d/99no-verify
 
       # Install system packages
       apt-get update -qq
       apt-get install -y -qq \
-        openjdk-21-jdk maven mysql-server nginx git curl openssl
-      git config --global http.sslVerify false
+        ca-certificates openjdk-21-jdk maven mysql-server nginx git curl openssl
+
+      # OrbStack exposes the macOS filesystem to the VM. When Netskope is installed,
+      # trust its corporate root and tenant CA instead of disabling TLS verification.
+      netskope_ca_dir="/Library/Application Support/Netskope/STAgent/data"
+      if [[ -r "${netskope_ca_dir}/nscacert.pem" && \
+            -r "${netskope_ca_dir}/nstenantcert.pem" ]]; then
+        install -m 0644 "${netskope_ca_dir}/nscacert.pem" \
+          /usr/local/share/ca-certificates/netskope-root.crt
+        install -m 0644 "${netskope_ca_dir}/nstenantcert.pem" \
+          /usr/local/share/ca-certificates/netskope-tenant.crt
+        update-ca-certificates
+      fi
+      # A previous interrupted run may have left units repeatedly restarting.
+      systemctl stop auth-service issue-service api-gateway 2>/dev/null || true
+
+      # Create the runtime identity before systemd can start an application unit.
+      useradd --system --no-create-home --shell /usr/sbin/nologin issueapp 2>/dev/null || true
+      chgrp issueapp /etc/issue-tracker/*.env
 
       # Replace the committed placeholder with one shared random signing key.
       jwt_secret="$(openssl rand -hex 32)"
@@ -170,8 +181,10 @@ write_files:
       # Start MySQL and wait until it accepts connections
       systemctl enable --now mysql
       for i in $(seq 1 30); do
-        mysql -u root -e "SELECT 1;" &>/dev/null && break || sleep 3
+        mysqladmin ping --silent && break
+        sleep 3
       done
+      mysqladmin ping --silent
 
       # Create databases + user
       mysql -u root <<'SQL'
@@ -183,29 +196,24 @@ write_files:
       FLUSH PRIVILEGES;
       SQL
 
-      # Node.js 20 LTS
-      curl -fsSLk https://deb.nodesource.com/setup_20.x | bash -
-      apt-get install -y nodejs
-
-      # Clone
-      git clone --branch v1 --depth 1 \
-        https://github.com/amitactive2008/sample-spring-boot-application.git \
-        /opt/issue-tracker
+      # Clone on the first run; update cleanly when retrying an interrupted run.
+      if [[ -d /opt/issue-tracker/.git ]]; then
+        git -C /opt/issue-tracker pull --ff-only origin v1
+      else
+        git clone --branch v1 --depth 1 \
+          https://github.com/amitactive2008/sample-spring-boot-application.git \
+          /opt/issue-tracker
+      fi
 
       # Maven builds
-      mvn -f /opt/issue-tracker/auth-service/pom.xml  clean package -DskipTests -q
-      mvn -f /opt/issue-tracker/issue-service/pom.xml clean package -DskipTests -q
-      mvn -f /opt/issue-tracker/api-gateway/pom.xml   clean package -DskipTests -q
+      /opt/issue-tracker/auth-service/mvnw -f /opt/issue-tracker/auth-service/pom.xml \
+        clean package -DskipTests -B --no-transfer-progress
+      /opt/issue-tracker/issue-service/mvnw -f /opt/issue-tracker/issue-service/pom.xml \
+        clean package -DskipTests -B --no-transfer-progress
+      /opt/issue-tracker/api-gateway/mvnw -f /opt/issue-tracker/api-gateway/pom.xml \
+        clean package -DskipTests -B --no-transfer-progress
 
-      # React build
-      cd /opt/issue-tracker/frontend-service
-      REACT_APP_API_BASE_URL="" npm ci
-      REACT_APP_API_BASE_URL="" npm run build
-
-      # System user + permissions
-      useradd --system --no-create-home --shell /usr/sbin/nologin issueapp 2>/dev/null || true
       chown -R issueapp:issueapp /opt/issue-tracker
-      chgrp issueapp /etc/issue-tracker/*.env
 
       # Nginx
       rm -f /etc/nginx/sites-enabled/default
@@ -215,12 +223,18 @@ write_files:
       # Spring Boot services
       systemctl daemon-reload
       systemctl enable auth-service issue-service api-gateway
-      systemctl start auth-service && sleep 20
-      systemctl start issue-service && sleep 10
-      systemctl start api-gateway
+      systemctl restart auth-service
+      sleep 20
+      systemctl is-active --quiet auth-service
+      systemctl restart issue-service
+      sleep 10
+      systemctl is-active --quiet issue-service
+      systemctl restart api-gateway
+      sleep 10
+      systemctl is-active --quiet api-gateway
 
       echo "=== Provisioning complete: $(date) ==="
-      echo "Frontend: http://issue-tracker-v1.orb.local/"
+      echo "Run scripts/sync-frontend-to-vm.sh on the Mac to publish the frontend."
 
 runcmd:
   - /opt/provision.sh

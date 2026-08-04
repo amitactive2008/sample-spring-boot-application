@@ -1,23 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { FaEnvelope, FaLock, FaBug } from 'react-icons/fa';
-import * as Yup from 'yup';
 import BasicForm from '../../components/BasicForm';
 import CustomTextField from '../../components/CustomTextField';
 import CustomButton from '../../components/CustomButton';
 import BasicAlertBox from '../../components/BasicAlertBox';
 import { loginUser, saveAuthData } from '../../api/auth';
-
-const loginSchema = Yup.object().shape({
-  email: Yup.string()
-    .trim()
-    .email('Invalid email')
-    .max(254, 'Email is too long')
-    .required('Email is required'),
-  password: Yup.string()
-    .required('Password is required')
-    .min(4, 'Password must be at least 4 characters'),
-});
+import { validateLogin } from '../../validation/forms';
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -91,7 +80,7 @@ const LoginPage = () => {
         <div className="bg-white/30 backdrop-blur-2xl border border-white/40 rounded-2xl p-8 shadow-2xl">
           <BasicForm
             initialValues={{ email: '', password: '' }}
-            validationSchema={loginSchema}
+            validate={validateLogin}
             onSubmit={handleLogin}
           >
             {({ errors, touched, handleChange, values, isSubmitting }) => (

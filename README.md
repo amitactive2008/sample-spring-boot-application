@@ -543,17 +543,32 @@ Or download the app from https://orbstack.dev and follow the guided setup.
 From the repository root (where `cloud-init.yaml` lives):
 
 ```bash
-orbctl create \
-  --cpus 2 \
-  --memory 4G \
-  --disk 20G \
-  --user-data cloud-init.yaml \
-  ubuntu:22.04 \
-  issue-tracker-v1
+./scripts/create-orbstack-vm.sh
+```
+
+The wrapper builds React on the Mac, creates the Ubuntu VM with the equivalent `orbctl
+create` flags, waits for cloud-init, copies the static frontend into the VM, and performs
+an HTTP smoke test. Building the frontend on macOS avoids corporate npm registry policy
+failures inside the VM.
+
+Pass a different machine name as the first argument when needed:
+
+```bash
+./scripts/create-orbstack-vm.sh issue-tracker-v1-test
+```
+
+Confirm that the machine name is not already in use before creating it:
+
+```bash
+orbctl version
+orbctl list
 ```
 
 OrbStack creates the VM and immediately begins cloud-init provisioning in the background.
 The command returns as soon as the VM boots — provisioning continues inside the VM.
+
+> Cloud-init user data runs only when the VM is first created. Running `orbctl create`
+> again does not update an existing `issue-tracker-v1` machine.
 
 > Total provisioning time is approximately **20–30 minutes** (Maven and npm downloads).
 > The VM is reachable via SSH straight away; provisioning runs in the background.
@@ -561,6 +576,9 @@ The command returns as soon as the VM boots — provisioning continues inside th
 ### 8.3 Follow provisioning progress
 
 ```bash
+# Wait for cloud-init and return a non-zero exit code if provisioning fails
+orbctl run -m issue-tracker-v1 cloud-init status --wait --long
+
 # Watch the provisioning log in real time
 orbctl run -m issue-tracker-v1 sudo tail -f /var/log/issue-tracker-setup.log
 
@@ -573,8 +591,30 @@ Provisioning is complete when the log prints:
 
 ```
 === Provisioning complete: <timestamp> ===
-Frontend: http://issue-tracker-v1.orb.local/
+Run scripts/sync-frontend-to-vm.sh on the Mac to publish the frontend.
 ```
+
+When using `scripts/create-orbstack-vm.sh`, the wrapper performs that sync automatically
+and finishes with `VM is ready: http://issue-tracker-v1.orb.local/`.
+
+If cloud-init reports `status: error`, inspect the last command recorded in the setup log:
+
+```bash
+orbctl run -m issue-tracker-v1 \
+  sudo tail -n 200 /var/log/issue-tracker-setup.log
+```
+
+The provisioner is safe to retry after a transient download or network failure:
+
+```bash
+orbctl run -m issue-tracker-v1 sudo /opt/provision.sh
+```
+
+On managed Macs with Netskope installed, the provisioner imports the Mac's Netskope root
+and tenant certificates into Ubuntu's trust store. TLS verification stays enabled for
+Git, Maven, curl, and apt. If your organization uses a different proxy, ask your
+administrator for its PEM-encoded CA certificate and install it in
+`/usr/local/share/ca-certificates/` before running `sudo update-ca-certificates`.
 
 ### 8.4 Access the VM
 
@@ -820,7 +860,24 @@ sudo systemctl restart auth-service
 ### Provisioning log (OrbStack)
 
 ```bash
+orbctl run -m issue-tracker-v1 cloud-init status --long
 orbctl run -m issue-tracker-v1 sudo cat /var/log/issue-tracker-setup.log
+```
+
+The setup log ends with `Provisioning failed at line ...` when a command fails. Common
+first-boot causes are an unavailable package registry or a corporate proxy rejecting a
+download. The provisioner retries npm downloads and can be run again with:
+
+```bash
+orbctl run -m issue-tracker-v1 sudo /opt/provision.sh
+```
+
+If you changed `cloud-init.yaml` itself, recreate the VM so OrbStack applies the new user
+data. Deleting the machine removes all data stored inside it:
+
+```bash
+orbctl delete issue-tracker-v1
+./scripts/create-orbstack-vm.sh
 ```
 
 ---

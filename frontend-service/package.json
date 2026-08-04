@@ -18,8 +18,7 @@
     "recharts": "^3.7.0",
     "styled-components": "^6.3.8",
     "tailwindcss": "^3.4.19",
-    "web-vitals": "^2.1.4",
-    "yup": "^1.7.1"
+    "web-vitals": "^2.1.4"
   },
   "scripts": {
     "start": "react-scripts start",

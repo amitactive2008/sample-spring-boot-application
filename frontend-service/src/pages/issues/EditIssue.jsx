@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import * as Yup from 'yup';
 import BasicForm from '../../components/BasicForm';
 import CustomSelectField from '../../components/CustomSelectField';
 import CustomButton from '../../components/CustomButton';
@@ -9,13 +8,7 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import { getIssueById, updateIssue } from '../../api/issues';
 import { getUserRole } from '../../api/auth';
 import { FaArrowLeft } from 'react-icons/fa';
-
-const issueSchema = Yup.object().shape({
-  title: Yup.string().required('Title is required'),
-  description: Yup.string(),
-  severity: Yup.string().required('Severity is required'),
-  priority: Yup.string().required('Priority is required'),
-});
+import { validateIssue } from '../../validation/forms';
 
 const severityOptions = [
   { value: 'LOW', label: 'Low' },
@@ -116,7 +109,7 @@ const EditIssue = ({ sidebarItems, basePath = '' }) => {
               severity: issue.severity || 'MEDIUM',
               priority: issue.priority || 'MEDIUM',
             }}
-            validationSchema={issueSchema}
+            validate={validateIssue}
             onSubmit={handleSubmit}
             enableReinitialize={true}
           >

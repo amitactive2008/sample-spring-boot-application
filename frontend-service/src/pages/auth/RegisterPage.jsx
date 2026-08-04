@@ -1,33 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { FaEnvelope, FaLock, FaBug } from 'react-icons/fa';
-import * as Yup from 'yup';
 import BasicForm from '../../components/BasicForm';
 import CustomTextField from '../../components/CustomTextField';
 import CustomButton from '../../components/CustomButton';
 import BasicAlertBox from '../../components/BasicAlertBox';
 import { registerUser } from '../../api/auth';
-
-const registerSchema = Yup.object().shape({
-  email: Yup.string()
-    .trim()
-    .email('Invalid email')
-    .max(254, 'Email is too long')
-    .required('Email is required'),
-  password: Yup.string()
-    .required('Password is required')
-    .min(8, 'Password must be at least 8 characters')
-    .matches(/[a-z]/, 'Password must contain at least one lowercase letter')
-    .matches(/[A-Z]/, 'Password must contain at least one uppercase letter')
-    .matches(/[0-9]/, 'Password must contain at least one number')
-    .matches(
-      /[@$!%*?&\-_.#]/,
-      'Password must contain at least one special character (@ $ ! % * ? & - _ . #)'
-    ),
-  confirmPassword: Yup.string()
-    .oneOf([Yup.ref('password'), null], 'Passwords must match')
-    .required('Confirm password is required'),
-});
+import { validateRegistration } from '../../validation/forms';
 
 const RegisterPage = () => {
   const navigate = useNavigate();
@@ -94,7 +73,7 @@ const RegisterPage = () => {
         <div className="bg-white/30 backdrop-blur-2xl border border-white/40 rounded-2xl p-8 shadow-2xl">
           <BasicForm
             initialValues={{ email: '', password: '', confirmPassword: '' }}
-            validationSchema={registerSchema}
+            validate={validateRegistration}
             onSubmit={handleRegister}
           >
             {({ errors, touched, handleChange, values, isSubmitting }) => (

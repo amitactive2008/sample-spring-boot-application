@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import * as Yup from 'yup';
 import BasicForm from '../../components/BasicForm';
 import CustomSelectField from '../../components/CustomSelectField';
 import CustomButton from '../../components/CustomButton';
@@ -9,13 +8,7 @@ import DashboardLayout from '../../components/layout/DashboardLayout';
 import { createIssue } from '../../api/issues';
 import { getUserRole } from '../../api/auth';
 import { FaArrowLeft } from 'react-icons/fa';
-
-const issueSchema = Yup.object().shape({
-  title: Yup.string().required('Title is required'),
-  description: Yup.string(),
-  severity: Yup.string().required('Severity is required'),
-  priority: Yup.string().required('Priority is required'),
-});
+import { validateIssue } from '../../validation/forms';
 
 const severityOptions = [
   { value: 'LOW', label: 'Low' },
@@ -70,7 +63,7 @@ const CreateIssue = ({ sidebarItems, basePath = '' }) => {
         <div className="bg-white/30 backdrop-blur-xl rounded-2xl shadow-xl p-6 border border-white/40">
           <BasicForm
             initialValues={{ title: '', description: '', severity: 'MEDIUM', priority: 'MEDIUM' }}
-            validationSchema={issueSchema}
+            validate={validateIssue}
             onSubmit={handleSubmit}
           >
             {({ errors, touched, handleChange, values, isSubmitting }) => (
