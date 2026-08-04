@@ -55,6 +55,9 @@ pipeline-reports/
 security-reports/
 .security-cache/
 .verify/
+# SonarScanner working directories (generated per analysed module)
+**/.scannerwork/
+**/.sonar/
 **/dependency-check-report.*
 **/semgrep-*.json
 **/zap-report.*
