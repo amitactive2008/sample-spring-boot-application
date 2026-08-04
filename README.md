@@ -1751,6 +1751,30 @@ The NVD step in `security-pipeline.sh` calls this same helper, so a normal full 
 run also incrementally refreshes and reuses the initialized cache. Use `--skip-nvd` only
 when you deliberately want to omit dependency scanning.
 
+**Using a macOS-initialized cache for the full VM pipeline:**
+
+Keep the database on a VM-local filesystem during scans. Copying it into the VM is safer
+than running the H2 database directly from the macOS shared mount. From the macOS
+repository checkout:
+
+```bash
+# Ensure OrbStack and issue-tracker-v1 are running, then copy the existing cache.
+./scripts/sync-nvd-cache-to-vm.sh
+
+# Forward the key by environment-variable name and run the full pipeline in the VM.
+export NVD_API_KEY=<your-key>
+ORBENV=NVD_API_KEY orbctl run \
+  -m issue-tracker-v1 \
+  -u root \
+  -w /opt/issue-tracker \
+  ./security-pipeline.sh
+```
+
+The sync helper also copies the current `security-pipeline.sh` and `scripts/nvd-scan.sh`
+into `/opt/issue-tracker`. The VM pipeline reuses the copied database, performs one
+incremental update, and then scans all Java services. Do not run a Mac or VM NVD update
+while the cache copy is in progress.
+
 **Step 2 — Add the plugin to each Java service's `pom.xml`:**
 
 Add inside `<build><plugins>` in `auth-service/pom.xml`, `issue-service/pom.xml`,
