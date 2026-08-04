@@ -1558,22 +1558,44 @@ The two Trivy steps are separate jobs in CI — config scan before build, image 
 
 ### 10.10 SonarQube — Code Quality & Security Analysis
 
-Same configuration as v1. Run the Maven Sonar analysis on the host-side build:
+The pipeline supports three modes:
 
-```bash
-cd auth-service
-./mvnw sonar:sonar \
-  -Dsonar.host.url=http://localhost:9000 \
-  -Dsonar.login=$SONAR_TOKEN \
-  -Dsonar.projectKey=issue-tracker-auth-v2
+| Mode | Behavior |
+|---|---|
+| `local` | Starts the local SonarQube Community container and creates projects automatically |
+| `cloud` | Uses pre-created SonarQube Cloud monorepo projects |
+| `external` | Uses pre-created projects on another SonarQube Server |
+
+For SonarQube Cloud, import this repository using **Setup a monorepo** and create these
+four projects, replacing the prefix with your own unique value:
+
+```text
+<prefix>_auth-service
+<prefix>_issue-service
+<prefix>_api-gateway
+<prefix>_frontend-service
 ```
 
-For v2, also enable SonarQube's **Docker/container analysis** so it understands the
-containerized build context. In the SonarQube project settings, enable
-"Docker" under the analysis scope.
+Generate a new token from **My Account → Security**. Never put it in this repository or
+pass it as a command-line option. Load it into the current terminal and run the pipeline:
 
-See v1 README Section 12.7 for Docker-based SonarQube server setup, `sonar-project.properties`,
-and frontend analysis commands.
+```bash
+cp .env.sonar.example .env.sonar.local
+# Edit .env.sonar.local and set your organization key and chosen project prefix.
+set -a
+source .env.sonar.local
+set +a
+
+read -rsp "Sonar token: " SONAR_TOKEN
+echo
+export SONAR_TOKEN
+
+./security-pipeline.sh --skip-dast
+```
+
+The Maven scanner analyses each Java service. The pinned SonarScanner for NPM analyses
+the React `src/` directory. The token remains in process memory and is never written to a
+pipeline report.
 
 ---
 
@@ -1583,8 +1605,9 @@ Same conditions as v1. The Quality Gate evaluates results from SonarQube and blo
 merge if thresholds are not met:
 
 ```bash
-STATUS=$(curl -s -u $SONAR_TOKEN: \
-  "http://localhost:9000/api/qualitygates/project_status?projectKey=issue-tracker-auth-v2" \
+STATUS=$(printf 'Authorization: Bearer %s\n' "$SONAR_TOKEN" \
+  | curl -s -H @- \
+  "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY_PREFIX}_auth-service" \
   | jq -r '.projectStatus.status')
 [ "$STATUS" = "OK" ] || { echo "Quality Gate FAILED"; exit 1; }
 ```
@@ -1793,20 +1816,14 @@ jobs:
           ignore-unfixed: true
 
       # ── 10 & 11. SonarQube + Quality Gate ──────────────────────────────
-      - name: SonarQube analysis
-        run: |
-          ./mvnw sonar:sonar \
-            -Dsonar.host.url=${{ secrets.SONAR_HOST }} \
-            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
-            -Dsonar.projectKey=issue-tracker-auth-v2
-        working-directory: auth-service
-      - name: Quality Gate check
-        run: |
-          STATUS=$(curl -s -u ${{ secrets.SONAR_TOKEN }}: \
-            "${{ secrets.SONAR_HOST }}/api/qualitygates/project_status?projectKey=issue-tracker-auth-v2" \
-            | jq -r '.projectStatus.status')
-          echo "Quality Gate: $STATUS"
-          [ "$STATUS" = "OK" ] || exit 1
+      - name: SonarQube Cloud analysis and Quality Gates
+        env:
+          SONAR_MODE: cloud
+          SONAR_HOST_URL: https://sonarcloud.io
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_PROJECT_KEY_PREFIX: ${{ vars.SONAR_PROJECT_KEY_PREFIX }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: ./security-pipeline.sh --skip-nvd --skip-build --skip-dast
 
       # ── Push images (only on merge to main) ─────────────────────────────
       - name: Push images to registry
@@ -1833,14 +1850,16 @@ jobs:
 
 ---
 
-### Required GitHub Secrets
+### Required GitHub Actions configuration
 
 | Secret | Description |
 |---|---|
 | `NVD_API_KEY` | Free API key from https://nvd.nist.gov/developers/request-an-api-key |
-| `SONAR_HOST` | SonarQube server URL (e.g., `http://sonarqube.internal:9000`) |
 | `SONAR_TOKEN` | SonarQube analysis token |
 | `STAGING_URL` | Full URL of the staging deployment for DAST (e.g., `http://staging.internal:3000`) |
+
+Configure `SONAR_ORGANIZATION` and `SONAR_PROJECT_KEY_PREFIX` as GitHub Actions variables,
+not secrets. The Sonar token is the only Sonar value that belongs in GitHub Secrets.
 
 ---
 
@@ -1856,8 +1875,8 @@ and writes timestamped reports to `/tmp/pipeline-reports/`.
 ### 11.1 What it does
 
 The script orchestrates all 12 checks in the correct order and handles step dependencies
-automatically — if Maven Build fails, the steps that require compiled artifacts (NVD Check,
-Lint, SonarQube) are skipped rather than producing misleading results.
+automatically. NVD can run independently from the Maven build; SpotBugs and Sonar analysis
+are skipped if that build fails rather than producing misleading results.
 
 ```
 10.1  Gitleaks     ──► 10.2  Hadolint   ──► 10.3  Checkstyle ──► 10.4  Semgrep
@@ -1926,6 +1945,10 @@ chmod +x security-pipeline.sh
 | `--skip-install` | Abort instead of auto-installing a missing tool |
 | `--nvd-key KEY` | NVD API key for faster dependency scanning (step 10.6) |
 | `--nvd-data-dir DIR` | Override the persistent NVD database directory |
+| `--sonar-mode MODE` | `local`, `cloud`, or `external` |
+| `--sonar-host URL` | SonarQube Server or Cloud URL |
+| `--sonar-org KEY` | SonarQube Cloud organization key |
+| `--sonar-project-prefix KEY` | Prefix shared by the four project keys |
 | `--app-url URL` | Base URL for DAST scan (default: `http://localhost:3000`) |
 | `--repo DIR` | Repository root directory (default: current working directory) |
 
@@ -1940,7 +1963,12 @@ Environment variables accepted as alternatives to flags:
 | `SKIP_NVD=true` | `--skip-nvd` |
 | `APP_URL` | `--app-url` |
 | `REPO_DIR` | `--repo` |
-| `SONAR_TOKEN` | Pre-existing SonarQube token — skips auto token generation |
+| `SONAR_MODE` | `local`, `cloud`, or `external`; default `local` |
+| `SONAR_HOST_URL` | Server URL; Cloud defaults to `https://sonarcloud.io` |
+| `SONAR_ORGANIZATION` | Required SonarQube Cloud organization key |
+| `SONAR_PROJECT_KEY_PREFIX` | Required project-key prefix for Cloud/external modes |
+| `SONAR_REGION` | Optional Cloud region, for example `us` |
+| `SONAR_TOKEN` | Required for Cloud/external modes; never written to reports |
 
 ---
 
@@ -1961,6 +1989,16 @@ Runs everything except SonarQube and DAST.
 **Full pipeline including SonarQube (~25–30 min, needs ~1.5 GB free RAM):**
 ```bash
 ./security-pipeline.sh --skip-dast --nvd-key $NVD_API_KEY
+```
+
+**Full pipeline using SonarQube Cloud:**
+```bash
+export SONAR_MODE=cloud
+export SONAR_ORGANIZATION=<your-organization-key>
+export SONAR_PROJECT_KEY_PREFIX=<your-project-key-prefix>
+read -rsp "Sonar token: " SONAR_TOKEN && echo && export SONAR_TOKEN
+
+./security-pipeline.sh --skip-dast --nvd-key "$NVD_API_KEY"
 ```
 
 **Full pipeline with DAST — app must be running via podman-compose:**
@@ -2040,13 +2078,12 @@ Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
 ├── trivy-image-frontend-service.json
 ├── trivy.log
 ├── sonar.log
-├── sonar-token.txt               ← SonarQube token (used by Quality Gate step)
 ├── gate.log
 ├── zap-report.html               ← open in browser for the full ZAP report
 └── zap-report.json
 ```
 
-**SonarQube dashboard** (when step 10.10 runs):
+**Local SonarQube dashboard** (when step 10.10 runs with `SONAR_MODE=local`):
 
 ```
 URL   : http://localhost:9000
