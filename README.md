@@ -1939,6 +1939,14 @@ upgrade to.
 with a single command. It is designed to run directly on the OrbStack VM
 (`issue-tracker-v1`) or any Linux host where the repository is deployed.
 
+> **Do not run the full pipeline directly from a macOS checkout.** Its default
+> repository is `/opt/issue-tracker`, and its automatic installers use Linux tools such
+> as `apt`. If a macOS run prints `/opt/issue-tracker: Permission denied` followed by a
+> `Password:` prompt, press `Ctrl+C`. The prompt is from macOS `sudo`, but entering the
+> Mac account password will not make the Linux installation steps compatible. Run the
+> pipeline inside the VM as shown in [13.4 Usage](#134-usage). The standalone
+> `./scripts/nvd-scan.sh` helper is supported directly on macOS.
+
 ### 13.1 What it does
 
 The script orchestrates the full pipeline end-to-end:
@@ -2000,6 +2008,33 @@ orbctl run -m issue-tracker-v1 sudo chmod +x /opt/issue-tracker/security-pipelin
 
 ### 13.4 Usage
 
+From the macOS repository checkout, execute the full pipeline inside the VM:
+
+```bash
+# Full pipeline inside issue-tracker-v1
+orbctl run \
+  -m issue-tracker-v1 \
+  -u root \
+  -w /opt/issue-tracker \
+  ./security-pipeline.sh
+
+# Full pipeline without the NVD step
+orbctl run \
+  -m issue-tracker-v1 \
+  -u root \
+  -w /opt/issue-tracker \
+  ./security-pipeline.sh --skip-nvd
+```
+
+Alternatively, after opening a VM shell with `orbctl ssh issue-tracker-v1`, run:
+
+```bash
+cd /opt/issue-tracker
+./security-pipeline.sh [OPTIONS]
+```
+
+The command syntax inside the VM is:
+
 ```
 ./security-pipeline.sh [OPTIONS]
 ```
@@ -2031,8 +2066,7 @@ Environment variables accepted as alternatives to flags:
 **Examples:**
 
 ```bash
-# Full pipeline (installs any missing tools automatically)
-./security-pipeline.sh
+# These examples run inside /opt/issue-tracker on the Linux VM.
 
 # Run every check except NVD while its initial database setup is deferred
 ./security-pipeline.sh --skip-nvd
@@ -2052,6 +2086,14 @@ APP_URL=http://192.168.64.10 ./security-pipeline.sh \
 
 # Non-interactive CI mode — fail immediately if any tool is missing
 ./security-pipeline.sh --skip-install --skip-dast
+```
+
+For the cached Java dependency scan only, running directly from the macOS checkout is
+supported:
+
+```bash
+export NVD_API_KEY=<your-key>
+./scripts/nvd-scan.sh scan
 ```
 
 ### 13.5 SonarQube setup (steps 12.7 & 12.8)
