@@ -6,10 +6,14 @@ and the React frontend — runs as an isolated container. Communication between 
 happens over a shared Podman network; the only port exposed to the host is the frontend
 (3000) and optionally the gateway (8096).
 
+Source code, contributor guidance, and repeatable verification live in this repository;
+generated builds and local security artifacts stay outside Git.
+
 ---
 
 ## Table of Contents
 
+0. [Repository Map and Development](#repository-map-and-development)
 1. [What Changed from v1](#1-what-changed-from-v1)
 2. [Architecture](#2-architecture)
 3. [Prerequisites](#3-prerequisites)
@@ -39,6 +43,37 @@ happens over a shared Podman network; the only port exposed to the host is the f
 
 ---
 
+## Repository Map and Development
+
+| Path | Ownership |
+|---|---|
+| `api-gateway/` | JWT validation, edge authorization, CORS, and public routing |
+| `auth-service/` | Authentication, token issuance, users, and roles |
+| `issue-service/` | Issue workflow, filtering, status changes, and history |
+| `frontend-service/` | React UI and browser API clients under `src/api/` |
+| `docs/ARCHITECTURE.md` | Runtime boundaries, configuration, and change placement |
+| `scripts/verify.sh` | Repeatable backend, frontend, and Compose validation |
+| `docker-compose.yml` | v2 local container topology |
+| `security-pipeline.sh` | Extended optional security and image-quality checks |
+
+AI coding agents should follow [`AGENTS.md`](AGENTS.md). The detailed system design is in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Run the smallest relevant verification while developing:
+
+```bash
+./scripts/verify.sh backend     # all Maven tests
+./scripts/verify.sh frontend    # lint, tests, and an isolated production build
+./scripts/verify.sh containers  # validate Compose configuration
+./scripts/verify.sh all         # backend + frontend
+```
+
+Generated artifacts are intentionally excluded from Git. Do not edit or commit
+`frontend-service/build/`, `node_modules/`, Maven `target/`, `.verify/`,
+`.security-cache/`, or `security-reports/`.
+
+---
+
 ## 1. What Changed from v1
 
 | Concern | v1 (bare-metal) | v2 (containers) |
@@ -56,6 +91,10 @@ happens over a shared Podman network; the only port exposed to the host is the f
 ---
 
 ## 2. Architecture
+
+This section summarizes the deployed topology. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for module ownership, dependency direction,
+security boundaries, configuration precedence, and guidance on where changes belong.
 
 ```
   Browser / External client

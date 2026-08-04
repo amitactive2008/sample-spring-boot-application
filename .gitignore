@@ -52,6 +52,9 @@ podman-compose.override.yml
 
 # ── Pipeline reports ──────────────────────────────────────────────────────────
 pipeline-reports/
+security-reports/
+.security-cache/
+.verify/
 **/dependency-check-report.*
 **/semgrep-*.json
 **/zap-report.*
@@ -101,3 +104,8 @@ $RECYCLE.BIN/
 *.temp
 *.swp
 *.swo
+
+# ── Local tooling caches ──────────────────────────────────────────────────────
+.cache/
+.eslintcache
+coverage/
