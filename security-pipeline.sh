@@ -32,6 +32,7 @@
 # Environment variables (alternative to flags):
 #   NVD_API_KEY       NVD API key for dependency-check
 #   NVD_DATA_DIR      Persistent NVD cache (default: <repo>/.security-cache/dependency-check)
+#   NPM_CACHE_DIR     Persistent npm cache (default: <repo>/.security-cache/npm)
 #   SKIP_NVD          Set to true to skip the NVD dependency scan
 #   SONAR_TOKEN       Pre-existing SonarQube token (skips auto-setup)
 #   REPO_DIR          Repository root directory
@@ -60,6 +61,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REPORT_ROOT="${REPORT_ROOT:-}"
 NVD_API_KEY="${NVD_API_KEY:-}"
 NVD_DATA_DIR="${NVD_DATA_DIR:-}"
+NPM_CACHE_DIR="${NPM_CACHE_DIR:-}"
 APP_URL="${APP_URL:-http://localhost}"
 SKIP_NVD="${SKIP_NVD:-false}"
 SKIP_SONAR=false
@@ -70,6 +72,7 @@ SONAR_HOST="http://localhost:9000"
 SONAR_ADMIN_PASS="PipelineAdmin@1234"   # changed from 'admin' on first run
 SONAR_PROJECT_KEY="issue-tracker"
 SONAR_TOKEN="${SONAR_TOKEN:-}"          # set by step_sonar, read by step_gate
+GITLEAKS_MODE=""
 
 # Java 21 is required for Spring Boot 4.0.1 (auth-service + issue-service)
 # The cloud-init VM installs Java 17; this script installs 21 alongside it.
@@ -95,6 +98,7 @@ done
 
 REPORT_ROOT="${REPORT_ROOT:-${REPO_DIR}/security-reports}"
 REPORT_DIR="${REPORT_ROOT}/${TIMESTAMP}"
+NPM_CACHE_DIR="${NPM_CACHE_DIR:-${REPO_DIR}/.security-cache/npm}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLORS
@@ -322,6 +326,47 @@ install_if_missing() {
     fi
 }
 
+setup_node20() {
+    local node_major=""
+
+    if command -v node &>/dev/null; then
+        node_major=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    fi
+
+    if [[ "$node_major" =~ ^[0-9]+$ ]] && [[ "$node_major" -ge 20 ]] && \
+       command -v npm &>/dev/null; then
+        log_ok "Node.js / npm: $(node --version) / $(npm --version)"
+    else
+        if [[ "$SKIP_INSTALL" == "true" ]]; then
+            log_error "Node.js 20 with npm is required and --skip-install is set"
+            return 1
+        fi
+
+        log_info "Installing Node.js 20 and npm..."
+        sudo apt-get install -y ca-certificates curl gnupg -qq || return 1
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - || return 1
+        sudo apt-get install -y nodejs -qq || return 1
+
+        node_major=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+        if [[ ! "$node_major" =~ ^[0-9]+$ ]] || [[ "$node_major" -lt 20 ]] || \
+           ! command -v npm &>/dev/null; then
+            log_error "Node.js 20/npm installation failed"
+            return 1
+        fi
+        log_ok "Node.js / npm installed: $(node --version) / $(npm --version)"
+    fi
+
+    # Node uses a bundled CA set by default. Include Ubuntu's trust store so a
+    # corporate CA imported by cloud-init remains verified by npm as well.
+    if [[ -r /etc/ssl/certs/ca-certificates.crt ]]; then
+        export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+    fi
+
+    mkdir -p "$NPM_CACHE_DIR"
+    export npm_config_cache="$NPM_CACHE_DIR"
+    log_ok "npm cache: ${NPM_CACHE_DIR}"
+}
+
 setup_tools() {
     log_banner "Environment Setup"
 
@@ -350,10 +395,7 @@ setup_tools() {
         "command -v pip3" \
         "sudo apt-get install -y python3-pip -qq" || return 1
 
-    install_if_missing "Node.js 18 / npm" \
-        "command -v npm" \
-        'curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - -qq
-         sudo apt-get install -y nodejs -qq' || return 1
+    setup_node20 || return 1
 
     install_if_missing "Docker" \
         "command -v docker" \
@@ -363,19 +405,23 @@ setup_tools() {
              sudo apt-get install -y docker.io -qq
          fi' || return 1
 
-    # ── Gitleaks (binary release) ──────────────────────────────────────────
-    install_if_missing "gitleaks" \
-        "command -v gitleaks" \
-        'case "$(uname -m)" in
-             arm64|aarch64) GL_ARCH=arm64 ;;
-             x86_64|amd64)  GL_ARCH=x64 ;;
-             *) echo "Unsupported Gitleaks architecture: $(uname -m)"; exit 1 ;;
-         esac
-         GL_VER=$(curl -sf https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-             | jq -r .tag_name | tr -d v)
-         curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" \
-           | sudo tar -xz -C /usr/local/bin gitleaks
-         sudo chmod +x /usr/local/bin/gitleaks' || return 1
+    # ── Gitleaks ───────────────────────────────────────────────────────────
+    # Corporate policy may block GitHub release assets while allowing GHCR.
+    if command -v gitleaks &>/dev/null; then
+        GITLEAKS_MODE="binary"
+        log_ok "Gitleaks: local binary"
+    else
+        if ! sudo docker image inspect ghcr.io/gitleaks/gitleaks:latest &>/dev/null; then
+            if [[ "$SKIP_INSTALL" == "true" ]]; then
+                log_error "Gitleaks binary/image unavailable and --skip-install is set"
+                return 1
+            fi
+            log_info "Pulling official Gitleaks container..."
+            sudo docker pull ghcr.io/gitleaks/gitleaks:latest || return 1
+        fi
+        GITLEAKS_MODE="container"
+        log_ok "Gitleaks: official container"
+    fi
 
     # ── Semgrep ────────────────────────────────────────────────────────────
     install_if_missing "semgrep" \
@@ -421,16 +467,34 @@ TOML
 
     log_info "Scanning full git history for secrets..."
 
-    if GIT_CONFIG_COUNT=1 \
-        GIT_CONFIG_KEY_0=safe.directory \
-        GIT_CONFIG_VALUE_0="$REPO_DIR" \
-        gitleaks detect \
-        --source    "$REPO_DIR" \
-        --config    "${REPORT_DIR}/.gitleaks.toml" \
-        --report-format json \
-        --report-path   "$report" \
-        --no-banner \
-        --verbose 2>&1; then
+    local rc
+    if [[ "$GITLEAKS_MODE" == "container" ]]; then
+        sudo docker run --rm \
+            -v "${REPO_DIR}:/repo:ro" \
+            -v "${REPORT_DIR}:/reports" \
+            ghcr.io/gitleaks/gitleaks:latest detect \
+            --source /repo \
+            --config /reports/.gitleaks.toml \
+            --report-format json \
+            --report-path /reports/gitleaks.json \
+            --no-banner \
+            --verbose 2>&1
+        rc=$?
+    else
+        GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=safe.directory \
+            GIT_CONFIG_VALUE_0="$REPO_DIR" \
+            gitleaks detect \
+            --source "$REPO_DIR" \
+            --config "${REPORT_DIR}/.gitleaks.toml" \
+            --report-format json \
+            --report-path "$report" \
+            --no-banner \
+            --verbose 2>&1
+        rc=$?
+    fi
+
+    if [[ $rc -eq 0 ]]; then
         log_ok "No secrets detected in git history"
         return 0
     else
@@ -652,7 +716,14 @@ step_nvd() {
     if command -v npm &>/dev/null && [[ -d "$fe_dir" ]]; then
         log_info "npm audit — frontend..."
         cd "$fe_dir"
-        [[ ! -x node_modules/.bin/eslint ]] && npm ci 2>&1 | tail -10
+        if [[ ! -x node_modules/.bin/eslint ]]; then
+            log_info "Installing frontend dependencies from the persistent npm cache..."
+            if ! npm ci --prefer-offline --no-audit 2>&1 | tail -20; then
+                log_error "frontend: npm ci failed; sync the Mac cache with scripts/sync-npm-cache-to-vm.sh"
+                cd - > /dev/null
+                return 1
+            fi
+        fi
         if npm audit --audit-level=high 2>&1; then
             log_ok "frontend: npm audit passed (no high/critical)"
         else
@@ -676,7 +747,14 @@ step_lint() {
     if command -v npm &>/dev/null && [[ -d "$fe_dir" ]]; then
         log_info "ESLint — React frontend..."
         cd "$fe_dir"
-        [[ ! -x node_modules/.bin/eslint ]] && npm ci 2>&1 | tail -10
+        if [[ ! -x node_modules/.bin/eslint ]]; then
+            log_info "Installing frontend dependencies from the persistent npm cache..."
+            if ! npm ci --prefer-offline --no-audit 2>&1 | tail -20; then
+                log_error "ESLint dependencies unavailable; sync the Mac npm cache first"
+                cd - > /dev/null
+                return 1
+            fi
+        fi
         if npm run lint 2>&1; then
             log_ok "ESLint: passed"
         else

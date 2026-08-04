@@ -126,15 +126,15 @@ Install the following on the host before proceeding.
 |---|---|---|
 | Java (JDK) | 21 | `sudo apt install openjdk-21-jdk` |
 | Maven | 3.9+ | `sudo apt install maven` |
-| Node.js | 18 LTS | see below |
+| Node.js | 20 LTS | see below |
 | MySQL | 8.x | `sudo apt install mysql-server` |
 | Nginx | latest | `sudo apt install nginx` |
 | Git | any | `sudo apt install git` |
 
-**Node.js 18 (via NodeSource):**
+**Node.js 20 (via NodeSource):**
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash -
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
 sudo apt install -y nodejs
 ```
 
@@ -143,7 +143,7 @@ sudo apt install -y nodejs
 ```bash
 java -version        # openjdk 21...
 mvn -version         # Apache Maven 3.9...
-node --version       # v18.x.x
+node --version       # v20.x.x
 mysql --version      # mysql  Ver 8...
 nginx -version       # nginx/1.x.x
 ```
@@ -547,9 +547,10 @@ From the repository root (where `cloud-init.yaml` lives):
 ```
 
 The wrapper builds React on the Mac, creates the Ubuntu VM with the equivalent `orbctl
-create` flags, waits for cloud-init, copies the static frontend into the VM, and performs
-an HTTP smoke test. Building the frontend on macOS avoids corporate npm registry policy
-failures inside the VM.
+create` flags, waits for cloud-init, copies the static frontend and npm cache into the VM,
+and performs an HTTP smoke test. Building the frontend on macOS avoids corporate npm
+registry policy failures inside the VM. The cached packages allow the VM security
+pipeline to run ESLint and `npm audit` without downloading the full dependency tree again.
 
 Pass a different machine name as the first argument when needed:
 
@@ -2060,10 +2061,10 @@ present on the host.
 |---|---|
 | Java 21 | `apt install openjdk-21-jdk` — required for Spring Boot 4.0.1 services |
 | Docker | `get.docker.com` installer — required for SonarQube and ZAP |
-| Gitleaks | Binary downloaded from GitHub Releases |
+| Gitleaks | Local binary when available; otherwise the official GHCR container |
 | Semgrep | `pip3 install semgrep` |
 | jq | `apt install jq` |
-| Node.js 18 / npm | NodeSource setup script — required for ESLint |
+| Node.js 20 / npm | NodeSource setup script — required for ESLint |
 
 > **NVD API key** — not installed automatically but strongly recommended.
 > Without it, the first dependency scan downloads the full NVD database which
@@ -2092,6 +2093,10 @@ orbctl run -m issue-tracker-v1 sudo chmod +x /opt/issue-tracker/security-pipelin
 From the macOS repository checkout, execute the full pipeline inside the VM:
 
 ```bash
+# Refresh the VM's reusable npm package cache first. The VM's corporate network
+# policy may reject packages that are already available in the Mac cache.
+./scripts/sync-npm-cache-to-vm.sh
+
 # Full pipeline inside issue-tracker-v1
 orbctl run \
   -m issue-tracker-v1 \
@@ -2138,6 +2143,7 @@ Environment variables accepted as alternatives to flags:
 |---|---|
 | `NVD_API_KEY` | `--nvd-key` |
 | `NVD_DATA_DIR` | Persistent Dependency-Check database cache |
+| `NPM_CACHE_DIR` | Persistent npm cache; defaults to `<repo>/.security-cache/npm` |
 | `SKIP_NVD=true` | `--skip-nvd` |
 | `APP_URL` | `--app-url` |
 | `REPO_DIR` | `--repo` |

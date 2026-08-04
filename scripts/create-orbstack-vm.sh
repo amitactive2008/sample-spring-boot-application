@@ -33,5 +33,6 @@ if ! orbctl run -m "${MACHINE_NAME}" cloud-init status --wait --long; then
 fi
 
 "${SCRIPT_DIR}/sync-frontend-to-vm.sh" "${MACHINE_NAME}"
+"${SCRIPT_DIR}/sync-npm-cache-to-vm.sh" "${MACHINE_NAME}"
 
 echo "VM is ready: http://${MACHINE_NAME}.orb.local/"
