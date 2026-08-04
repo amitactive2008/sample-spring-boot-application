@@ -116,7 +116,7 @@ for service in auth-service issue-service api-gateway; do
       -DskipTestScope=true \
       "-DfailBuildOnCVSS=${fail_cvss}" \
       -Dformats=HTML,JSON \
-      "-DoutputDirectory=${service_report_directory}" \
+      "-Dodc.outputDirectory=${service_report_directory}" \
       -B \
       --no-transfer-progress
   ); then
