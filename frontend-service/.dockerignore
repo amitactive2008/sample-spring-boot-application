@@ -1,0 +1,7 @@
+node_modules/
+build/
+.scannerwork/
+.git/
+.idea/
+.vscode/
+*.log

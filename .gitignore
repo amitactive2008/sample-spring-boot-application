@@ -86,9 +86,22 @@ debug-pod.yaml
 
 # ── Pipeline reports ──────────────────────────────────────────────────────────
 pipeline-reports/
+security-reports/
+.security-cache/
+.verify/
+**/.scannerwork/
+**/.sonar/
 **/dependency-check-report.*
 **/semgrep-*.json
 **/zap-report.*
+
+# Local Kubernetes secrets and rendered credentials
+kubernetes/**/secrets.local.yaml
+kubernetes/**/secret.local.yaml
+
+# Container image archives generated for kind loading
+*.tar
+*.oci
 
 # ── IntelliJ IDEA ─────────────────────────────────────────────────────────────
 .idea/
