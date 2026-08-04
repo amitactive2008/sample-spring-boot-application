@@ -928,24 +928,24 @@ cd api-gateway   && ./mvnw clean package -DskipTests -B && cd ..
 
 ### 10.6 NVD Check — Dependency Vulnerability Scanning
 
-Same as v1 — OWASP Dependency-Check scans JAR files and `npm audit` scans Node packages.
-Because the Maven build now also runs inside the Docker layer, run the check against the
-host-side JARs produced by the CI build step (Section 10.5).
+OWASP Dependency-Check scans the three Java services and `npm audit` scans the frontend.
+The helper keeps one persistent database at `.security-cache/dependency-check`. A scan
+updates that database once, incrementally, and then scans every Java service with automatic
+updates disabled so the same refreshed database is reused.
 
 ```bash
 export NVD_API_KEY=<your-nvd-api-key>
 
-# Scan all three services
-cd auth-service  && ./mvnw dependency-check:check && cd ..
-cd issue-service && ./mvnw dependency-check:check && cd ..
-cd api-gateway   && ./mvnw dependency-check:check && cd ..
+# Optional first-time initialization without scanning
+./scripts/nvd-scan.sh init
 
-# Frontend npm audit
-cd frontend-service && npm audit --audit-level=high && cd ..
+# Incremental update followed by all Java dependency scans
+./scripts/nvd-scan.sh scan
 ```
 
-See v1 README Section 12.9 for the full Maven plugin block, NVD API key setup, and
-suppression file template.
+The full `./security-pipeline.sh` command invokes the same scan helper and also runs
+`npm audit --audit-level=high`. The NVD cache is ignored by Git and is not copied into
+container images.
 
 ---
 
@@ -1901,8 +1901,11 @@ No manual setup is required before running it.
 | `./mvnw` | Already in each service directory | Steps 10.3, 10.5, 10.6, 10.7, 10.10 |
 
 > **NVD API key (optional but strongly recommended)**
-> Without one, the first NVD Check download takes 10–30 minutes.
+> Without one, the initial download and later updates can be heavily rate-limited.
 > Get a free key at https://nvd.nist.gov/developers/request-an-api-key
+>
+> The default database is `.security-cache/dependency-check`. If `odc.mv.db` already
+> exists there, every pipeline run performs only an incremental update before scanning.
 
 ---
 
@@ -1916,12 +1919,14 @@ chmod +x security-pipeline.sh
 | Option | Description |
 |---|---|
 | _(no options)_ | Full 12-step pipeline — installs missing tools, runs everything |
+| `--skip-nvd` | Skip NVD and frontend dependency auditing (step 10.6) |
 | `--skip-sonar` | Skip SonarQube (10.10) and Quality Gate (10.11) — saves ~5 min + 1.5 GB RAM |
 | `--skip-dast` | Skip ZAP scan (10.12) — use when the app is not running |
-| `--skip-build` | Skip Maven Build (10.5) and Podman Build (10.8) — use cached JARs/images |
+| `--skip-build` | Skip Maven and Podman builds; NVD still updates and scans dependencies |
 | `--skip-install` | Abort instead of auto-installing a missing tool |
 | `--nvd-key KEY` | NVD API key for faster dependency scanning (step 10.6) |
-| `--app-url URL` | Base URL for DAST scan (default: `http://localhost`) |
+| `--nvd-data-dir DIR` | Override the persistent NVD database directory |
+| `--app-url URL` | Base URL for DAST scan (default: `http://localhost:3000`) |
 | `--repo DIR` | Repository root directory (default: current working directory) |
 
 Environment variables accepted as alternatives to flags:
@@ -1929,6 +1934,10 @@ Environment variables accepted as alternatives to flags:
 | Variable | Equivalent flag |
 |---|---|
 | `NVD_API_KEY` | `--nvd-key` |
+| `NVD_DATA_DIR` | `--nvd-data-dir` |
+| `NVD_PLUGIN_VERSION` | Dependency-Check version; default `12.2.2` |
+| `NVD_FAIL_CVSS` | Failure threshold; default `7` |
+| `SKIP_NVD=true` | `--skip-nvd` |
 | `APP_URL` | `--app-url` |
 | `REPO_DIR` | `--repo` |
 | `SONAR_TOKEN` | Pre-existing SonarQube token — skips auto token generation |
@@ -1939,7 +1948,7 @@ Environment variables accepted as alternatives to flags:
 
 **Before every commit — fast pre-flight check (~2 min):**
 ```bash
-./security-pipeline.sh --skip-sonar --skip-dast --skip-build
+./security-pipeline.sh --skip-nvd --skip-sonar --skip-dast --skip-build
 ```
 Runs: Gitleaks → Hadolint → Checkstyle → Semgrep → Trivy config scan
 
@@ -1962,8 +1971,10 @@ podman-compose up -d                       # ensure stack is running
 
 **Re-run only security scans, skip rebuilding (images already built):**
 ```bash
-./security-pipeline.sh --skip-build --skip-sonar --app-url http://localhost
+./security-pipeline.sh --skip-build --skip-sonar --skip-dast --nvd-key "$NVD_API_KEY"
 ```
+Runs the incremental NVD update, all Java dependency scans, `npm audit`, and Trivy against
+existing images without rebuilding the application.
 
 **CI non-interactive mode — abort instead of auto-installing tools:**
 ```bash
@@ -1979,7 +1990,8 @@ podman-compose up -d                       # ensure stack is running
 │  Developer Workflow                                                      │
 │                                                                         │
 │  1. Make code changes                                                   │
-│  2. ./security-pipeline.sh --skip-sonar --skip-dast --skip-build        │
+│  2. ./security-pipeline.sh --skip-nvd --skip-sonar --skip-dast          │
+│                              --skip-build                               │
 │     └─ Gitleaks + Hadolint + Checkstyle + Semgrep + Trivy config        │
 │        Quick feedback before building anything                          │
 │                                                                         │
@@ -2015,7 +2027,10 @@ Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
 ├── semgrep.log
 ├── build.log
 ├── nvd.log
-│   (HTML + JSON reports also at: */target/dependency-check-report.*)
+├── nvd/
+│   ├── auth-service/dependency-check-report.{html,json}
+│   ├── issue-service/dependency-check-report.{html,json}
+│   └── api-gateway/dependency-check-report.{html,json}
 ├── lint.log
 ├── podman_build.log
 ├── trivy-config.json             ← Dockerfile + compose misconfiguration findings
@@ -2255,10 +2270,10 @@ rm -rf frontend-service/node_modules
 rm -rf frontend-service/build
 ```
 
-**Remove OWASP Dependency-Check cached data** (~500 MB on first run):
+**Remove the shared OWASP Dependency-Check database** (forces a full download next run):
 
 ```bash
-rm -rf ~/.owasp/dependency-check-data
+rm -rf .security-cache/dependency-check
 ```
 
 ---

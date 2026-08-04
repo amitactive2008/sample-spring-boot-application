@@ -23,23 +23,26 @@
 #   ./security-pipeline.sh [OPTIONS]
 #
 # Options:
+#   --skip-nvd        Skip step 10.6
 #   --skip-sonar      Skip steps 10.10 & 10.11 (no SonarQube container needed)
 #   --skip-dast       Skip step  10.12 (requires running app)
-#   --skip-build      Skip steps 10.5 & 10.8 (use cached images/JARs)
+#   --skip-build      Skip steps 10.5 & 10.8; NVD still updates and scans
 #   --skip-install    Abort instead of auto-installing a missing tool
 #   --nvd-key  KEY    NVD API key for faster dependency scan
-#   --app-url  URL    Target URL for DAST (default: http://localhost)
+#   --nvd-data-dir DIR Persistent NVD database (default: .security-cache/dependency-check)
+#   --app-url  URL    Target URL for DAST (default: http://localhost:3000)
 #   --repo     DIR    Repo root (default: current directory)
 #
 # Environment variable equivalents:
-#   NVD_API_KEY   SONAR_TOKEN   APP_URL   REPO_DIR
+#   NVD_API_KEY   NVD_DATA_DIR   NVD_PLUGIN_VERSION   NVD_FAIL_CVSS   SKIP_NVD
+#   SONAR_TOKEN   APP_URL        REPO_DIR
 #
 # Examples:
 #   # Full pipeline
 #   ./security-pipeline.sh
 #
 #   # Fast pre-commit check (no Docker-heavy steps)
-#   ./security-pipeline.sh --skip-sonar --skip-dast
+#   ./security-pipeline.sh --skip-nvd --skip-sonar --skip-dast --skip-build
 #
 #   # After podman-compose up — run everything including DAST
 #   ./security-pipeline.sh --skip-build --nvd-key $NVD_API_KEY
@@ -54,7 +57,11 @@ REPO_DIR="${REPO_DIR:-$(pwd)}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REPORT_DIR="/tmp/pipeline-reports/${TIMESTAMP}"
 NVD_API_KEY="${NVD_API_KEY:-}"
-APP_URL="${APP_URL:-http://localhost}"
+NVD_DATA_DIR="${NVD_DATA_DIR:-}"
+NVD_PLUGIN_VERSION="${NVD_PLUGIN_VERSION:-12.2.2}"
+NVD_FAIL_CVSS="${NVD_FAIL_CVSS:-7}"
+APP_URL="${APP_URL:-http://localhost:3000}"
+SKIP_NVD="${SKIP_NVD:-false}"
 SKIP_SONAR=false
 SKIP_DAST=false
 SKIP_BUILD=false
@@ -77,17 +84,21 @@ ALL_IMAGES=("$IMG_AUTH" "$IMG_ISSUE" "$IMG_GATEWAY" "$IMG_FRONTEND")
 # ─────────────────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --skip-nvd)     SKIP_NVD=true;       shift ;;
         --skip-sonar)   SKIP_SONAR=true;     shift ;;
         --skip-dast)    SKIP_DAST=true;      shift ;;
         --skip-build)   SKIP_BUILD=true;     shift ;;
         --skip-install) SKIP_INSTALL=true;   shift ;;
         --nvd-key)      NVD_API_KEY="$2";    shift 2 ;;
+        --nvd-data-dir) NVD_DATA_DIR="$2";   shift 2 ;;
         --app-url)      APP_URL="$2";        shift 2 ;;
         --repo)         REPO_DIR="$2";       shift 2 ;;
         -h|--help)      sed -n '2,55p' "$0"; exit 0 ;;
         *)              echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+NVD_DATA_DIR="${NVD_DATA_DIR:-${REPO_DIR}/.security-cache/dependency-check}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLORS
@@ -420,27 +431,36 @@ step_build() {
 # 10.6  NVD CHECK  (OWASP Dependency-Check)
 # ─────────────────────────────────────────────────────────────────────────────
 step_nvd() {
-    local plugin="org.owasp:dependency-check-maven:10.0.3:check"
     local failed=0
+    local nvd_script="${REPO_DIR}/scripts/nvd-scan.sh"
 
     if [[ -z "$NVD_API_KEY" ]]; then
-        log_warn "NVD_API_KEY not set — first run downloads full NVD DB (~10-30 min)"
+        log_warn "NVD_API_KEY not set — updates may be heavily rate-limited"
         log_warn "Get a free key: https://nvd.nist.gov/developers/request-an-api-key"
     fi
 
-    local opts="-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON"
-    [[ -n "$NVD_API_KEY" ]] && opts+=" -DnvdApiKey=${NVD_API_KEY}"
+    if [[ ! -x "$nvd_script" ]]; then
+        log_error "NVD scan helper is missing or not executable: ${nvd_script}"
+        return 1
+    fi
 
-    for svc in auth-service issue-service api-gateway; do
-        log_info "NVD scan: $svc..."
-        # shellcheck disable=SC2086
-        if mvnw "$svc" "$plugin" $opts -B --no-transfer-progress 2>&1; then
-            log_ok "$svc: no CVSS≥7 vulnerabilities"
-        else
-            log_error "$svc: HIGH/CRITICAL CVEs — ${REPO_DIR}/${svc}/target/dependency-check-report.html"
-            failed=$(( failed + 1 ))
-        fi
-    done
+    if [[ -f "${NVD_DATA_DIR}/odc.mv.db" ]]; then
+        log_info "Reusing local NVD database: ${NVD_DATA_DIR}"
+    else
+        log_warn "No local NVD database found; the initial download can take a long time"
+    fi
+
+    log_info "Updating the NVD database once, then scanning all Java services..."
+    if NVD_API_KEY="$NVD_API_KEY" \
+       NVD_DATA_DIR="$NVD_DATA_DIR" \
+       NVD_PLUGIN_VERSION="$NVD_PLUGIN_VERSION" \
+       NVD_FAIL_CVSS="$NVD_FAIL_CVSS" \
+       "$nvd_script" scan --report-dir "${REPORT_DIR}/nvd" 2>&1; then
+        log_ok "Java dependency scans passed"
+    else
+        log_error "One or more Java dependency scans failed — see ${REPORT_DIR}/nvd"
+        failed=$(( failed + 1 ))
+    fi
 
     if command -v npm &>/dev/null && [[ -d "${REPO_DIR}/frontend-service" ]]; then
         log_info "npm audit — frontend..."
@@ -752,6 +772,7 @@ main() {
     echo -e "  ${DIM}Repository : ${REPO_DIR}${NC}"
     echo -e "  ${DIM}App URL    : ${APP_URL}${NC}"
     echo -e "  ${DIM}Started    : $(date)${NC}"
+    [[ "$SKIP_NVD"   == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  NVD Check: SKIPPED"
     [[ "$SKIP_SONAR" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  SonarQube + Quality Gate: SKIPPED"
     [[ "$SKIP_DAST"  == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  DAST: SKIPPED"
     [[ "$SKIP_BUILD" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  Maven Build + Podman Build: SKIPPED"
@@ -766,19 +787,19 @@ main() {
     run_step "checkstyle"
     run_step "semgrep"
 
+    [[ "$SKIP_BUILD" == "true" ]] && skip_step "build" "--skip-build flag set" || run_step "build"
+
+    # Dependency-Check resolves dependencies from each pom.xml and uses its own
+    # persistent database, so it can run even when Maven/Podman builds are skipped.
+    [[ "$SKIP_NVD" == "true" ]] && skip_step "nvd" "--skip-nvd flag or SKIP_NVD=true set" || run_step "nvd"
+
     if [[ "$SKIP_BUILD" == "true" ]]; then
-        skip_step "build"        "--skip-build flag set"
+        skip_step "lint"         "--skip-build flag set; SpotBugs requires compiled classes"
         skip_step "podman_build" "--skip-build flag set"
     else
-        run_step "build"
-
-        # Steps that depend on compiled classes
         local build_ok=false
         [[ "$(get_status build)" == "PASS" ]] && build_ok=true
-
-        $build_ok && run_step "nvd"  || skip_step "nvd"  "Maven Build failed"
         $build_ok && run_step "lint" || skip_step "lint" "Maven Build failed"
-
         run_step "podman_build"
     fi
 
