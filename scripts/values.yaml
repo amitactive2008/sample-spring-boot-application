@@ -56,7 +56,7 @@ controller:
   # Run `kubectl get nodes` to find the correct value.
   nodeSelector:
     kubernetes.io/os: linux
-    kubernetes.io/hostname: vault-control-plane
+    kubernetes.io/hostname: issue-app-control-plane
 
   tolerations:
     - effect: NoSchedule
