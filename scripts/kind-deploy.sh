@@ -65,7 +65,7 @@ if [[ "${1:-}" == "teardown" ]]; then
 fi
 
 # ── Validate tools ────────────────────────────────────────────────────────────
-for tool in kind kubectl podman; do
+for tool in kind kubectl podman helm curl; do
   command -v "$tool" &>/dev/null || die "'$tool' is not installed. Install with: brew install $tool"
 done
 
@@ -141,6 +141,26 @@ for svc in api-gateway auth-service issue-service frontend-service; do
   wait_for_pods "$NAMESPACE" "app=$svc" 300 "$svc"
 done
 
+# ── 8. Verify host → kind → ingress → frontend ───────────────────────────────
+info "Waiting for the frontend through nginx Ingress at http://localhost:8080..."
+ingress_ready=false
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 5 http://localhost:8080/ >/dev/null 2>&1; then
+    ingress_ready=true
+    break
+  fi
+  sleep 2
+done
+
+if [[ "$ingress_ready" != "true" ]]; then
+  warn "Ingress controller status:"
+  kubectl get pods -n ingress-nginx -o wide >&2 || true
+  warn "Ingress resource status:"
+  kubectl describe ingress microservices-ingress -n "$NAMESPACE" >&2 || true
+  die "Frontend is not reachable at http://localhost:8080"
+fi
+ok "Frontend is reachable through nginx Ingress."
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════"
@@ -148,6 +168,7 @@ echo "  Issue Tracker is running on kind!"
 echo "════════════════════════════════════════════════"
 echo ""
 echo "  Frontend  →  http://localhost:8080"
+echo "              http://microservices-ingress.localhost:8080"
 echo "  API       →  http://localhost:8080/api"
 echo ""
 echo "  Default admin credentials:"

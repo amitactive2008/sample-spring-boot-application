@@ -42,8 +42,17 @@ controller:
     # Keep at 1 under Podman to avoid pids-limit EAGAIN failures on kind.
     workerProcesses: "1"
 
+  # kind maps macOS :8080 to port 80 on the control-plane container. Bind the
+  # controller pod to that node port so the Podman mapping has a real listener.
+  hostPort:
+    enabled: true
+    ports:
+      http: 80
+      https: 443
+
   service:
-    type: LoadBalancer          # NodePort is an alternative for bare-metal
+    # No cloud load balancer exists in kind; external traffic uses hostPort.
+    type: ClusterIP
 
   resources:
     requests:

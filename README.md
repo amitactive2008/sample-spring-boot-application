@@ -317,6 +317,7 @@ When complete:
 ════════════════════════════════════════════════
 
   Frontend  →  http://localhost:8080
+               http://microservices-ingress.localhost:8080
   API       →  http://localhost:8080/api
 
   Default admin credentials:
@@ -447,6 +448,18 @@ done
 ```
 http://localhost:8080
 ```
+
+For a readable hostname that still receives special localhost handling from browsers and
+corporate network agents, use:
+
+```text
+http://microservices-ingress.localhost:8080
+```
+
+The `.localhost` suffix resolves to `127.0.0.1` automatically, so no `/etc/hosts` entry is
+needed. A plain custom `/etc/hosts` name may be intercepted by managed network software
+such as Netskope. The `:8080` port remains required because this Kind cluster intentionally
+publishes nginx Ingress on host port 8080.
 
 Login: `admin@example.com` / `Admin1234!`
 
