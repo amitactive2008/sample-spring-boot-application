@@ -9,7 +9,8 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - http:
+    - host: sample-app.kind.local
+      http:
         paths:
           # Do not apply the API rewrite to frontend routes or static assets.
           - path: /

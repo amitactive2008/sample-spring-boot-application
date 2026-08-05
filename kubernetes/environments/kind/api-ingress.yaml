@@ -18,7 +18,8 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - http:
+    - host: sample-app.kind.local
+      http:
         paths:
           - path: /api(/|$)(.*)
             pathType: ImplementationSpecific

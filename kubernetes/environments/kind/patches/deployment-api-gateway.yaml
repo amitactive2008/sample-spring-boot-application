@@ -1,6 +1,6 @@
 # Patch: api-gateway
 #   1. CORS_ALLOWED_ORIGIN — all traffic goes through nginx on port 80, same origin;
-#      set to http://localhost for correctness.
+#      set to http://sample-app.kind.local for correctness.
 #   2. imagePullPolicy: Never — images are pre-loaded into kind via
 #      `kind load docker-image`; Never prevents Kubernetes from trying to
 #      pull from a registry that doesn't exist for local images.
@@ -16,4 +16,4 @@ spec:
           imagePullPolicy: Never
           env:
             - name: CORS_ALLOWED_ORIGIN
-              value: "http://localhost"
+              value: "http://sample-app.kind.local"

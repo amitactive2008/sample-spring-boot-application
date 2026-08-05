@@ -16,6 +16,8 @@ set -euo pipefail
 CLUSTER_NAME="issue-app"
 NAMESPACE="issue-app"
 KIND_DIR="kubernetes/environments/kind"
+APP_HOST="sample-app.kind.local"
+APP_URL="http://${APP_HOST}"
 
 # Image names — Podman always qualifies unregistered names with "localhost/",
 # so the tag in kind's containerd becomes localhost/<name>:local.
@@ -169,10 +171,14 @@ for svc in api-gateway auth-service issue-service frontend-service; do
 done
 
 # ── 8. Verify host → kind → ingress → frontend ───────────────────────────────
-info "Waiting for the frontend through nginx Ingress at http://localhost..."
+if ! grep -Eq "^[[:space:]]*127\.0\.0\.1[[:space:]]+([^#]*[[:space:]])?${APP_HOST}([[:space:]]|$)" /etc/hosts; then
+  warn "Browser access requires this /etc/hosts entry: 127.0.0.1 ${APP_HOST}"
+fi
+info "Waiting for the frontend through nginx Ingress at ${APP_URL}..."
 ingress_ready=false
 for _ in $(seq 1 30); do
-  if curl -fsS --max-time 5 http://localhost/ >/dev/null 2>&1; then
+  if curl --noproxy '*' --resolve "${APP_HOST}:80:127.0.0.1" \
+    -fsS --max-time 5 "${APP_URL}/" >/dev/null 2>&1; then
     ingress_ready=true
     break
   fi
@@ -184,13 +190,14 @@ if [[ "$ingress_ready" != "true" ]]; then
   kubectl get pods -n ingress-nginx -o wide >&2 || true
   warn "Ingress resources status:"
   kubectl describe ingress -n "$NAMESPACE" >&2 || true
-  die "Frontend is not reachable at http://localhost"
+  die "Frontend Ingress is not reachable for host ${APP_HOST}"
 fi
 
 # A rewrite annotation affects every path in its Ingress. Verify that the API
 # rewrite has not accidentally turned a frontend JavaScript request into HTML.
 asset_content_type=$(
-  curl -fsSI --max-time 10 http://localhost/static/js/bundle.js 2>/dev/null \
+  curl --noproxy '*' --resolve "${APP_HOST}:80:127.0.0.1" \
+    -fsSI --max-time 10 "${APP_URL}/static/js/bundle.js" 2>/dev/null \
     | awk -F ': *' 'tolower($1) == "content-type" { print tolower($2) }' \
     | tr -d '\r' \
     || true
@@ -206,9 +213,8 @@ echo "════════════════════════�
 echo "  Issue Tracker is running on kind!"
 echo "════════════════════════════════════════════════"
 echo ""
-echo "  Frontend  →  http://localhost"
-echo "              http://microservices-ingress.localhost"
-echo "  API       →  http://localhost/api"
+echo "  Frontend  →  ${APP_URL}"
+echo "  API       →  ${APP_URL}/api"
 echo ""
 echo "  Default admin credentials:"
 echo "    Email:    admin@example.com"

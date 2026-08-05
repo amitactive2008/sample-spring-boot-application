@@ -94,7 +94,7 @@ outside Git.
 
 ```
   Browser
-    │ http://localhost
+    │ http://sample-app.kind.local
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  kind single-node cluster                        │
@@ -142,7 +142,7 @@ outside Git.
 
 ```
 Browser  GET /api/auth/login
-  → nginx Ingress (localhost:80)
+  → nginx Ingress (sample-app.kind.local:80)
   → rewrite: strip /api  →  /auth/login
   → api-gateway Service (ClusterIP :80)
   → api-gateway Pod (:8096)
@@ -317,9 +317,8 @@ When complete:
   Issue Tracker is running on kind!
 ════════════════════════════════════════════════
 
-  Frontend  →  http://localhost
-               http://microservices-ingress.localhost
-  API       →  http://localhost/api
+  Frontend  →  http://sample-app.kind.local
+  API       →  http://sample-app.kind.local/api
 
   Default admin credentials:
     Email:    admin@example.com
@@ -449,23 +448,24 @@ for svc in auth-service issue-service api-gateway frontend-service; do
 done
 ```
 
-### 6.7 Open the application
+### 6.7 Configure the hostname and open the application
 
-```
-http://localhost
+Add this entry to `/etc/hosts` once:
+
+```bash
+echo "127.0.0.1 sample-app.kind.local" | sudo tee -a /etc/hosts
 ```
 
-For a readable hostname that still receives special localhost handling from browsers and
-corporate network agents, use:
+Then open:
 
 ```text
-http://microservices-ingress.localhost
+http://sample-app.kind.local
 ```
 
-The `.localhost` suffix resolves to `127.0.0.1` automatically, so no `/etc/hosts` entry is
-needed. A plain custom `/etc/hosts` name may be intercepted by managed network software
-such as Netskope. The Kind cluster publishes nginx Ingress on the standard HTTP port 80,
-so no explicit port is needed in the URL.
+The Kind cluster publishes nginx Ingress on standard HTTP port 80, so no explicit
+port is needed. Both Ingress resources match only the `sample-app.kind.local` host.
+If a corporate HTTP proxy intercepts local names, add `sample-app.kind.local` to
+the proxy bypass/`NO_PROXY` list.
 
 Login: `admin@example.com` / `Admin1234!`
 
@@ -473,10 +473,10 @@ Login: `admin@example.com` / `Admin1234!`
 
 ```bash
 # Gateway health
-curl http://localhost/api/actuator/health
+curl http://sample-app.kind.local/api/actuator/health
 
 # Admin login
-curl -X POST http://localhost/api/auth/login \
+curl -X POST http://sample-app.kind.local/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"Admin1234!"}'
 ```
@@ -517,7 +517,7 @@ production (AWS EKS) and local (kind).
 | `patches/pvc-storageclass.yaml` | `storageClassName`: gp2 → standard |
 | `patches/service-auth.yaml` | Service port: 80 → **8097** (matches `http://auth-service:8097` in gateway routes) |
 | `patches/service-issue.yaml` | Service port: 80 → **8098** (matches `http://issue-service:8098` in gateway routes) |
-| `patches/deployment-api-gateway.yaml` | `imagePullPolicy: Never`; `CORS_ALLOWED_ORIGIN: http://localhost` |
+| `patches/deployment-api-gateway.yaml` | `imagePullPolicy: Never`; `CORS_ALLOWED_ORIGIN: http://sample-app.kind.local` |
 | `patches/deployment-auth-service.yaml` | `imagePullPolicy: Never`; inject `APP_ADMIN_EMAIL/PASSWORD` from Secret; `SPRING_JPA_HIBERNATE_DDL_AUTO: update` (overrides prod validate — fresh DB has no tables) |
 | `patches/deployment-issue-service.yaml` | `imagePullPolicy: Never`; `SPRING_JPA_HIBERNATE_DDL_AUTO: update` |
 | `patches/deployment-frontend-service.yaml` | `imagePullPolicy: Never`; memory limit 256Mi → **1Gi** (react-scripts OOMKills at 256Mi); `NODE_OPTIONS=--max-old-space-size=512` |
@@ -633,7 +633,7 @@ kubectl get svc,ingress -n issue-app
 ### 9.3 API smoke tests
 
 ```bash
-HOST=http://localhost
+HOST=http://sample-app.kind.local
 
 # Register
 curl -s -X POST $HOST/api/auth/register \
@@ -662,7 +662,7 @@ curl -s "$HOST/api/issues" \
 ### 9.4 Open UI
 
 ```
-http://localhost
+http://sample-app.kind.local
 ```
 
 ---
@@ -1215,14 +1215,14 @@ analysis commands, and gate condition table.
 
 ### 12.9 DAST Audit — Against the Running Kind Cluster
 
-In v3, DAST runs against the kind cluster via `localhost` on the standard nginx Ingress HTTP port.
+In v3, DAST runs against `sample-app.kind.local` on the standard nginx Ingress HTTP port.
 
 ```bash
 # Ensure kind cluster is up and all pods ready
 kubectl get pods -n issue-app
 
 # Get admin JWT for authenticated scan
-TOKEN=$(curl -s -X POST http://localhost/api/auth/login \
+TOKEN=$(curl -s -X POST http://sample-app.kind.local/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"Admin1234!"}' \
   | jq -r '.accessToken')
@@ -1230,14 +1230,14 @@ TOKEN=$(curl -s -X POST http://localhost/api/auth/login \
 # Baseline passive scan against the frontend
 docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
   zap-baseline.py \
-  -t http://localhost \
+  -t http://sample-app.kind.local \
   -r zap-kind-baseline.html \
   -I
 
 # API active scan against the gateway
 docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
   zap-api-scan.py \
-  -t http://localhost/api \
+  -t http://sample-app.kind.local/api \
   -f openapi \
   -r zap-kind-api.html
 ```
@@ -1262,7 +1262,7 @@ docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
 | 12 | **Trivy image** | CI — image scan | OS packages + libs + secrets in layers | Yes (HIGH/CRIT) |
 | 13 | **SonarQube** | CI — analysis | All services + frontend | Yes |
 | 14 | **Quality Gate** | CI — gate | SonarQube metric thresholds | Yes |
-| 15 | **DAST Audit** | Post-deploy kind | Running cluster via `localhost` | Blocks promotion |
+| 15 | **DAST Audit** | Post-deploy kind | Running cluster via `sample-app.kind.local` | Blocks promotion |
 
 ---
 
@@ -1511,7 +1511,7 @@ jobs:
       - name: OWASP ZAP — Kind cluster
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target: http://localhost
+          target: http://sample-app.kind.local
           fail_action: true
 
 ```
@@ -1549,7 +1549,7 @@ inside the Kind cluster.
 | 12.6 | Checkstyle, Semgrep, Maven Build, NVD Check, Lint | — |
 | 12.7 | Podman Build + Trivy image scan | — |
 | 12.8 | SonarQube + Quality Gate | — |
-| 12.9 | DAST — ZAP against the running kind cluster | **URL: http://localhost** |
+| 12.9 | DAST — ZAP against the running kind cluster | **URL: http://sample-app.kind.local** |
 
 > **kubesec note:** The official `kubesec/kubesec:v2` Docker image has no ARM64
 > variant. The script uses the free public API at `https://v2.kubesec.io/scan`
@@ -1589,7 +1589,7 @@ chmod +x security-pipeline.sh
 | `--skip-build` | Skip Maven Build + Podman Build — use cached JARs/images |
 | `--skip-install` | Abort instead of auto-installing a missing tool |
 | `--nvd-key KEY` | NVD API key (avoids 30-min first-run download) |
-| `--app-url URL` | DAST target (default: `http://localhost`) |
+| `--app-url URL` | DAST target (default: `http://sample-app.kind.local`) |
 | `--repo DIR` | Repository root (default: current directory) |
 
 ### 13.4 Common run scenarios
@@ -1604,7 +1604,7 @@ chmod +x security-pipeline.sh
 
 # DAST against running kind cluster
 ./scripts/kind-deploy.sh          # ensure cluster is up
-./security-pipeline.sh --skip-sonar --app-url http://localhost
+./security-pipeline.sh --skip-sonar --app-url http://sample-app.kind.local
 
 # Full pipeline (~30-40 min, requires ~1.5 GB free RAM for SonarQube)
 ./security-pipeline.sh --nvd-key $NVD_API_KEY
@@ -1623,7 +1623,7 @@ chmod +x security-pipeline.sh
 3. ./scripts/kind-deploy.sh
    └─ Deploy to kind cluster
 
-4. ./security-pipeline.sh --skip-sonar --app-url http://localhost
+4. ./security-pipeline.sh --skip-sonar --app-url http://sample-app.kind.local
    └─ DAST against the live cluster
 ```
 
