@@ -2,8 +2,9 @@
 
 ## System context
 
-Issue Tracker v3 runs in a local kind cluster. Browser traffic enters through nginx
-Ingress, which serves the React application and forwards `/api/**` to the API gateway.
+Issue Tracker v3 runs in a local kind cluster. Browser traffic enters through two nginx
+Ingress resources: one serves the React application without rewriting its assets, and
+one strips `/api` before forwarding API traffic to the gateway.
 
 ```text
 Browser -> nginx Ingress (:80)

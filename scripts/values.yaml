@@ -40,7 +40,7 @@ controller:
     # Required for configuration-snippet / server-snippet annotations.
     allowSnippetAnnotations: "true"
     # Keep at 1 under Podman to avoid pids-limit EAGAIN failures on kind.
-    workerProcesses: "1"
+    worker-processes: "1"
 
   # kind maps macOS port 80 to port 80 on the control-plane container. Bind the
   # controller pod to that node port so the Podman mapping has a real listener.

@@ -30,7 +30,8 @@ resources:
   - mysql/service.yaml
   - mysql/pvc.yaml
   - secrets.yaml                   # plain Secrets (replaces ExternalSecrets)
-  - ingress.yaml                   # nginx ingress (replaces ALB ingress)
+  - ingress.yaml                   # frontend nginx ingress (no rewrite)
+  - api-ingress.yaml               # API nginx ingress (strips /api)
 
 # ── Image overrides ──────────────────────────────────────────────
 # Images are built with Podman and loaded via:

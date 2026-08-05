@@ -139,6 +139,10 @@ ok "All images loaded into kind."
 # files outside the kustomization root (../../base/...).
 # Workaround: build with --load-restrictor=LoadRestrictionsNone then apply.
 info "Applying Kubernetes manifests (Kustomize)..."
+# Apply the frontend Ingress first when upgrading an older combined Ingress.
+# This releases its /api path before the admission webhook validates the new,
+# separate API Ingress.
+kubectl apply -f "$KIND_DIR/ingress.yaml"
 kubectl kustomize "$KIND_DIR" --load-restrictor=LoadRestrictionsNone \
   | kubectl apply -f -
 ok "Manifests applied."
@@ -166,9 +170,21 @@ done
 if [[ "$ingress_ready" != "true" ]]; then
   warn "Ingress controller status:"
   kubectl get pods -n ingress-nginx -o wide >&2 || true
-  warn "Ingress resource status:"
-  kubectl describe ingress microservices-ingress -n "$NAMESPACE" >&2 || true
+  warn "Ingress resources status:"
+  kubectl describe ingress -n "$NAMESPACE" >&2 || true
   die "Frontend is not reachable at http://localhost"
+fi
+
+# A rewrite annotation affects every path in its Ingress. Verify that the API
+# rewrite has not accidentally turned a frontend JavaScript request into HTML.
+asset_content_type=$(
+  curl -fsSI --max-time 10 http://localhost/static/js/bundle.js 2>/dev/null \
+    | awk -F ': *' 'tolower($1) == "content-type" { print tolower($2) }' \
+    | tr -d '\r' \
+    || true
+)
+if [[ "$asset_content_type" != application/javascript* ]]; then
+  die "Frontend asset routing is invalid: /static/js/bundle.js returned '${asset_content_type:-no content type}'"
 fi
 ok "Frontend is reachable through nginx Ingress."
 

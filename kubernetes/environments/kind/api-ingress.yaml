@@ -1,0 +1,29 @@
+# API nginx Ingress — strips the public /api prefix before the API gateway.
+#
+# Request flow:
+#   Browser      GET /api/auth/login
+#   nginx        strips /api → forwards GET /auth/login to api-gateway:80
+#   api-gateway  matches Path=/auth/** → proxies to auth-service
+#
+# Keep this rewrite separate from the frontend Ingress. nginx annotations apply
+# to every path in one Ingress and would otherwise rewrite React static assets.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: microservices-api-ingress
+  namespace: issue-app
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 80

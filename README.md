@@ -79,7 +79,7 @@ outside Git.
 | Cluster | single Podman network | single-node kind cluster |
 | Manifest format | `docker-compose.yml` | Kubernetes YAML + Kustomize overlays |
 | Ingress | host port binding | nginx Ingress Controller (port 80) |
-| URL path routing | Nginx proxy blocks | Ingress rewrite-target strips `/api` prefix |
+| URL path routing | Nginx proxy blocks | API Ingress rewrite-target strips `/api` prefix |
 | Secrets | `.env` file | Kubernetes `Secret` objects |
 | Non-secret config | inline env in Compose | `ConfigMap` objects |
 | Image delivery | `podman build` → local | `podman build` → `podman save \| kind load image-archive` |
@@ -174,7 +174,8 @@ kubernetes/
     └── kind/                      # Local dev overlay
         ├── kind-cluster.yaml      # kind cluster config (single node, port 80→80)
         ├── kustomization.yaml     # Selects from base + adds kind-specific resources
-        ├── ingress.yaml           # nginx Ingress (replaces ALB)
+        ├── ingress.yaml           # frontend nginx Ingress (no rewrite)
+        ├── api-ingress.yaml       # API nginx Ingress (strips /api)
         ├── secrets.yaml           # Plain K8s Secrets (replaces ExternalSecrets)
         ├── mysql/
         │   ├── deployment.yaml    # in-cluster MySQL 8.0
@@ -504,7 +505,8 @@ production (AWS EKS) and local (kind).
 | `mysql/service.yaml` | ClusterIP Service so pods reach MySQL at `mysql:3306` |
 | `mysql/pvc.yaml` | 1 Gi PVC using `standard` StorageClass (kind built-in) |
 | `secrets.yaml` | Plain `Secret` objects with dev credentials |
-| `ingress.yaml` | nginx Ingress that strips `/api` prefix before forwarding to gateway |
+| `ingress.yaml` | Frontend nginx Ingress without path rewriting |
+| `api-ingress.yaml` | API nginx Ingress that strips the public `/api` prefix |
 
 ### 7.3 Patches applied
 
@@ -536,10 +538,12 @@ never attempts to pull from an external registry.
 ### 7.5 Ingress path rewrite
 
 The frontend's `REACT_APP_API_BASE_URL=/api` means every API call is prefixed with
-`/api` (e.g., `/api/auth/login`). The nginx Ingress strips this prefix before forwarding
-to the gateway, which expects `/auth/login`:
+`/api` (e.g., `/api/auth/login`). The API nginx Ingress strips this prefix before
+forwarding to the gateway, which expects `/auth/login`:
 
 ```yaml
+metadata:
+  name: microservices-api-ingress
 annotations:
   nginx.ingress.kubernetes.io/rewrite-target: /$2
 spec:
@@ -553,6 +557,11 @@ spec:
                 port:
                   number: 80
 ```
+
+The frontend `/` route is defined in the separate `microservices-ingress` resource
+without a rewrite annotation. nginx annotations apply to every path in one Ingress;
+combining these routes would rewrite `/static/js/bundle.js` to `/` and return HTML
+instead of JavaScript.
 
 ---
 
@@ -581,7 +590,8 @@ All resources live in namespace `issue-app`.
 | Service | `frontend-service` | ClusterIP `:80 → 3000` |
 | PVC | `mysql-pvc` | 1 Gi, `standard` StorageClass |
 | PVC | `issue-storage-pvc` | `standard` StorageClass |
-| Ingress | `microservices-ingress` | nginx, `/api/*` → gateway, `/` → frontend |
+| Ingress | `microservices-api-ingress` | nginx, `/api/*` → gateway with `/api` stripped |
+| Ingress | `microservices-ingress` | nginx, `/` → frontend without rewriting static assets |
 
 Resource limits per pod:
 
