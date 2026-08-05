@@ -10,7 +10,7 @@
 #     nginx    strips /api  →  forwards  GET /auth/login  to api-gateway:80
 #     api-gateway  matches route  Path=/auth/**  →  proxies to auth-service
 #
-# App is available at http://localhost:8080 (mapped by kind-cluster.yaml)
+# App is available at http://localhost (mapped by kind-cluster.yaml)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

@@ -6,7 +6,7 @@ Issue Tracker v3 runs in a local kind cluster. Browser traffic enters through ng
 Ingress, which serves the React application and forwards `/api/**` to the API gateway.
 
 ```text
-Browser -> nginx Ingress (:8080)
+Browser -> nginx Ingress (:80)
              |-- /       -> frontend-service (:3000)
              `-- /api/** -> api-gateway (:8096)
                                 |-- /auth/**   -> auth-service (:8097)

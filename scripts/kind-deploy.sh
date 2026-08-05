@@ -81,9 +81,20 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
   info "kind cluster '$CLUSTER_NAME' already exists — skipping creation."
 else
+  if command -v lsof &>/dev/null && lsof -nP -iTCP:80 -sTCP:LISTEN | grep -q .; then
+    lsof -nP -iTCP:80 -sTCP:LISTEN >&2
+    die "Host port 80 is already in use. Stop that process before creating the cluster."
+  fi
   info "Creating kind cluster '$CLUSTER_NAME' (using Podman)..."
   kind create cluster --name "$CLUSTER_NAME" --config "$KIND_DIR/kind-cluster.yaml"
   ok "Cluster created."
+fi
+
+# Kind port mappings are fixed when the control-plane container is created.
+control_plane_container="${CLUSTER_NAME}-control-plane"
+port_mapping=$(podman port "$control_plane_container" 80/tcp 2>/dev/null || true)
+if ! grep -Eq ':80$' <<< "$port_mapping"; then
+  die "Cluster '$CLUSTER_NAME' was not created with host port 80. Run './scripts/kind-deploy.sh teardown' and deploy again."
 fi
 
 # Point kubectl at the cluster
@@ -142,10 +153,10 @@ for svc in api-gateway auth-service issue-service frontend-service; do
 done
 
 # ── 8. Verify host → kind → ingress → frontend ───────────────────────────────
-info "Waiting for the frontend through nginx Ingress at http://localhost:8080..."
+info "Waiting for the frontend through nginx Ingress at http://localhost..."
 ingress_ready=false
 for _ in $(seq 1 30); do
-  if curl -fsS --max-time 5 http://localhost:8080/ >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 http://localhost/ >/dev/null 2>&1; then
     ingress_ready=true
     break
   fi
@@ -157,7 +168,7 @@ if [[ "$ingress_ready" != "true" ]]; then
   kubectl get pods -n ingress-nginx -o wide >&2 || true
   warn "Ingress resource status:"
   kubectl describe ingress microservices-ingress -n "$NAMESPACE" >&2 || true
-  die "Frontend is not reachable at http://localhost:8080"
+  die "Frontend is not reachable at http://localhost"
 fi
 ok "Frontend is reachable through nginx Ingress."
 
@@ -167,9 +178,9 @@ echo "════════════════════════�
 echo "  Issue Tracker is running on kind!"
 echo "════════════════════════════════════════════════"
 echo ""
-echo "  Frontend  →  http://localhost:8080"
-echo "              http://microservices-ingress.localhost:8080"
-echo "  API       →  http://localhost:8080/api"
+echo "  Frontend  →  http://localhost"
+echo "              http://microservices-ingress.localhost"
+echo "  API       →  http://localhost/api"
 echo ""
 echo "  Default admin credentials:"
 echo "    Email:    admin@example.com"

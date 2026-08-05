@@ -31,7 +31,7 @@
 #   --skip-build      Skip Maven Build + Podman Build (use cached JARs/images)
 #   --skip-install    Abort if a tool is missing instead of installing it
 #   --nvd-key  KEY    NVD API key for faster dependency scan
-#   --app-url  URL    Target URL for DAST (default: http://localhost:8080)
+#   --app-url  URL    Target URL for DAST (default: http://localhost)
 #   --repo     DIR    Repo root (default: current directory)
 #
 # Examples:
@@ -42,7 +42,7 @@
 #   ./security-pipeline.sh --nvd-key $NVD_API_KEY
 #
 #   # DAST against the running kind cluster
-#   ./security-pipeline.sh --skip-build --skip-sonar --app-url http://localhost:8080
+#   ./security-pipeline.sh --skip-build --skip-sonar --app-url http://localhost
 # =============================================================================
 set -uo pipefail
 
@@ -53,7 +53,7 @@ REPO_DIR="${REPO_DIR:-$(pwd)}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REPORT_DIR="/tmp/pipeline-reports/${TIMESTAMP}"
 NVD_API_KEY="${NVD_API_KEY:-}"
-APP_URL="${APP_URL:-http://localhost:8080}"   # kind cluster listens on 8080
+APP_URL="${APP_URL:-http://localhost}"
 SKIP_SONAR=false
 SKIP_DAST=false
 SKIP_BUILD=false
