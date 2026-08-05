@@ -6,6 +6,13 @@ layer from nginx `Ingress` to **Envoy Gateway** + **Gateway API HTTPRoute** + **
 TLS — giving you HTTPS on `localhost` with a self-signed certificate, HTTP→HTTPS redirect,
 and `/api` prefix stripping, all declaratively configured.
 
+Developer entry points:
+
+- [Architecture](docs/ARCHITECTURE.md) — service boundaries and request flow.
+- [Contributing](CONTRIBUTING.md) — local workflow and Git expectations.
+- [AI contributor guide](AGENTS.md) — repository rules for coding agents.
+- `./scripts/verify.sh all` — repeatable backend, frontend, Helm, shell, and Git checks.
+
 ---
 
 ## Table of Contents
@@ -23,7 +30,7 @@ and `/api` prefix stripping, all declaratively configured.
 11. [Day-2 Operations](#11-day-2-operations)
 12. [Tear Down](#12-tear-down)
 13. [Security & Code Quality Pipeline](#13-security--code-quality-pipeline)
-14. [Automated Pipeline Script](#14-automated-pipeline-script--security-pipelinesh)
+14. [Automated Verification](#14-automated-verification)
 
 ---
 
@@ -126,7 +133,16 @@ Browser  GET https://localhost:8443/api/auth/login
 
 ## 3. Repository Layout
 
-```
+```text
+AGENTS.md                           # AI contributor rules
+CONTRIBUTING.md                     # human contributor workflow
+docs/ARCHITECTURE.md                # service and deployment architecture
+
+api-gateway/                        # reactive routing and JWT validation
+auth-service/                       # authentication and user administration
+issue-service/                      # issue workflows and history
+frontend-service/                   # React single-page application
+
 helm/
 └── issue-tracker/
     ├── Chart.yaml                # chart metadata
@@ -152,7 +168,8 @@ kind/
 └── kind-cluster.yaml             # kind cluster config (ports 8080→80, 8443→443)
 
 scripts/
-└── helm-deploy.sh                # one-shot deploy script
+├── helm-deploy.sh                # Podman + Kind + Helm deployment
+└── verify.sh                     # repeatable contributor checks
 ```
 
 ---
@@ -1371,67 +1388,27 @@ jobs:
 
 ---
 
-## 14. Automated Pipeline Script — `security-pipeline.sh`
+## 14. Automated Verification
 
-`security-pipeline.sh` at the repository root runs the full security and code
-quality pipeline (Gitleaks, Checkstyle, Semgrep, Maven Build, NVD Check, Lint,
-SonarQube, Quality Gate, DAST) with a single command.
-
-In the v4 context it runs on the **developer's workstation or a CI agent** —
-not inside the Kind cluster. It validates source code and container images
-before `helm upgrade --install` pushes them into the cluster.
-
-### 14.1 Usage
+`scripts/verify.sh` provides one stable entry point for contributors and CI.
+It does not install global tools or start the Kind cluster.
 
 ```bash
-chmod +x security-pipeline.sh
+# Run everything
+./scripts/verify.sh all
 
-# Full pipeline (installs missing tools automatically)
-./security-pipeline.sh
-
-# Skip Docker-dependent steps (no Docker install needed)
-./security-pipeline.sh --skip-sonar --skip-dast
-
-# With NVD API key (avoids slow first-run database download)
-./security-pipeline.sh --nvd-key xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-
-# DAST against the running Kind cluster (after helm deploy)
-./security-pipeline.sh --skip-sonar --app-url http://localhost:8080
+# Run only the affected area
+./scripts/verify.sh backend
+./scripts/verify.sh frontend
+./scripts/verify.sh helm
+./scripts/verify.sh shell
+./scripts/verify.sh repo
 ```
 
-### 14.2 Where it fits in the v4 workflow
+Backend tests use isolated H2 databases and a test-only JWT key. Frontend output
+is written under `.verify/`, which is ignored by Git. Helm verification lints and
+renders the chart without modifying the current cluster.
 
-```
-1. ./security-pipeline.sh --skip-dast      ← run before building images
-2. podman build / podman save / kind load image-archive
-3. helm upgrade --install issue-tracker ./helm/issue-tracker -f values.yaml
-4. ./security-pipeline.sh --skip-sonar     ← DAST against the live cluster
-   --app-url http://localhost:8080
-```
-
-### 14.3 Options
-
-| Option | Description |
-|---|---|
-| `--skip-sonar` | Skip SonarQube + Quality Gate (no Docker needed) |
-| `--skip-dast` | Skip ZAP scan (use before cluster is deployed) |
-| `--nvd-key KEY` | NVD API key for faster dependency scanning |
-| `--app-url URL` | Target URL for DAST (default: `http://localhost`, use `http://localhost:8080` for Kind) |
-| `--repo DIR` | Repository root (default: `/opt/issue-tracker`, override if cloned elsewhere) |
-| `--skip-install` | Abort instead of auto-installing a missing tool |
-
-### 14.4 Reports
-
-Every run writes a timestamped report directory:
-
-```
-/tmp/pipeline-reports/<timestamp>/
-├── pipeline.log          ← combined log
-├── gitleaks.json         ← secret scan findings
-├── semgrep-java.json     ← Java SAST findings
-├── semgrep-js.json       ← React SAST findings
-├── nvd.log               ← CVE scan (HTML reports in */target/)
-├── sonar-token.txt       ← SonarQube token
-├── zap-report.html       ← ZAP report (open in browser)
-└── zap-report.json
-```
+The extended security tools in Section 13 remain optional workstation or CI
+checks. Store their caches and reports only in the ignored locations documented
+in `.gitignore`.

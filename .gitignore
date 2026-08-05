@@ -41,3 +41,9 @@ yarn-error.log*
 *.tmp
 *.swp
 *.swo
+
+# Local Kubernetes and container artifacts
+kubeconfig*
+*.tar
+*.tar.gz
+*.tgz
