@@ -63,9 +63,9 @@ apiGateway:
   replicas: 1
   port: 8096
   cors:
-    # Traffic enters via Envoy Gateway on :8443 (same origin as the browser).
+    # Traffic enters through the same HTTPS origin as the browser.
     # Set to the real frontend origin in prod (e.g. https://yourdomain.com).
-    allowedOrigin: "https://localhost:8443"
+    allowedOrigin: "https://sample-app.kind.local"
   resources:
     requests:
       cpu: 250m
@@ -155,16 +155,16 @@ gatewayAPI:
   # GatewayClass created by this application chart for the Envoy controller.
   gatewayClassName: envoy-gateway
   # Hostname the Gateway and Certificate are bound to.
-  # Use "localhost" for local kind dev; set to the real domain in prod.
-  hostname: "localhost"
-  # HTTP listener port (maps to kind extraPortMapping host:8080 → node:80)
+  # Local kind hostname. Add it to /etc/hosts before opening the UI.
+  hostname: "sample-app.kind.local"
+  # HTTP listener port (maps to kind extraPortMapping host:80 → node:80)
   httpPort: 80
-  # HTTPS listener port (maps to kind extraPortMapping host:8443 → node:443)
+  # HTTPS listener port (maps to kind extraPortMapping host:443 → node:443)
   httpsPort: 443
   # HTTP→HTTPS redirect: all plain HTTP requests are redirected to HTTPS.
   httpRedirect: true
-  # Public HTTPS port used in redirects. Local kind maps host 8443 to listener 443.
-  externalHttpsPort: 8443
+  # Public HTTPS port used in redirects.
+  externalHttpsPort: 443
   # /api prefix is stripped before the request reaches api-gateway
   # (same behaviour as the nginx rewrite-target annotation in v3).
   apiPrefix: "/api"

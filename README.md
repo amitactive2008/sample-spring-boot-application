@@ -3,7 +3,7 @@
 Helm-driven deployment of the Issue Tracker on a local **kind** cluster. v4 replaces
 the raw Kustomize manifests of v3 with a single Helm chart and upgrades the ingress
 layer from nginx `Ingress` to **Envoy Gateway** + **Gateway API HTTPRoute** + **cert-manager**
-TLS — giving you HTTPS on `localhost` with a self-signed certificate, HTTP→HTTPS redirect,
+TLS — giving you HTTPS on `sample-app.kind.local` with a self-signed certificate, HTTP→HTTPS redirect,
 and `/api` prefix stripping, all declaratively configured.
 
 Developer entry points:
@@ -44,7 +44,7 @@ Developer entry points:
 | TLS | none (HTTP only) | **cert-manager** self-signed certificate (HTTPS) |
 | HTTP→HTTPS | not configured | Automatic 301 redirect via HTTPRoute |
 | Prefix stripping | nginx `rewrite-target` annotation | HTTPRoute `URLRewrite` filter |
-| Cluster config | `kubernetes/environments/kind/kind-cluster.yaml` | `kind/kind-cluster.yaml` (adds port 8443→443) |
+| Cluster config | `kubernetes/environments/kind/kind-cluster.yaml` | `kind/kind-cluster.yaml` (maps host ports 80/443) |
 | Release management | `kubectl apply -k` | `helm upgrade --install` |
 | Dry-run / lint | `kubectl diff -k` | `helm lint` + `helm template` |
 | Rollback | `kubectl apply` of previous commit | `helm rollback <release> <revision>` |
@@ -57,14 +57,14 @@ Developer entry points:
 ```
   Browser
     │
-    │  https://localhost:8443   (or  http://localhost:8080 → 301 → HTTPS)
+    │  https://sample-app.kind.local   (or HTTP → 301 → HTTPS)
     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │              kind single-node cluster  (kind-issue-app)                │
 │                                                                        │
 │  kind extraPortMappings:                                               │
-│    host:8080 → node:80   (HTTP listener → redirect)                   │
-│    host:8443 → node:443  (HTTPS listener → TLS termination)           │
+│    host:80  → node:80   (HTTP listener → redirect)                    │
+│    host:443 → node:443  (HTTPS listener → TLS termination)            │
 │                                                                        │
 │  ┌────────────────────────────────────────────────────────────────┐   │
 │  │           Envoy Gateway Controller                              │   │
@@ -118,8 +118,8 @@ Developer entry points:
 
 **Request flow (HTTPS):**
 ```
-Browser  GET https://localhost:8443/api/auth/login
-  → kind extraPortMapping :8443 → node:443
+Browser  GET https://sample-app.kind.local/api/auth/login
+  → kind extraPortMapping :443 → node:443
   → Envoy proxy (hostPort 443)
   → TLS terminated (cert-manager self-signed cert)
   → HTTPRoute https-routes, matches /api/*
@@ -165,7 +165,7 @@ helm/
         └── certmanager.yaml      # NEW: ClusterIssuer + Certificate
 
 kind/
-└── kind-cluster.yaml             # kind cluster config (ports 8080→80, 8443→443)
+└── kind-cluster.yaml             # kind cluster config (host ports 80/443)
 
 scripts/
 ├── helm-deploy.sh                # Podman + Kind + Helm deployment
@@ -202,7 +202,21 @@ Podman Desktop is optional; the deployment script uses the Podman CLI and its
 machine. Docker Desktop is not required. The script sets
 `KIND_EXPERIMENTAL_PROVIDER=podman` automatically.
 
-### 4.3 System requirements
+### 4.3 Local hostname
+
+Add the development hostname once on macOS:
+
+```bash
+echo "127.0.0.1 sample-app.kind.local" | sudo tee -a /etc/hosts
+```
+
+Confirm it resolves before opening the application:
+
+```bash
+dscacheutil -q host -a name sample-app.kind.local
+```
+
+### 4.4 System requirements
 
 | Resource | Minimum | Recommended |
 |---|---|---|
@@ -244,9 +258,9 @@ When complete:
   Issue Tracker — running on kind with HTTPS!
 ════════════════════════════════════════════════════════════
 
-  Frontend  →  https://localhost:8443
-  API       →  https://localhost:8443/api
-  HTTP      →  http://localhost:8080  (redirects → HTTPS)
+  Frontend  →  https://sample-app.kind.local
+  API       →  https://sample-app.kind.local/api
+  HTTP      →  http://sample-app.kind.local  (redirects → HTTPS)
 ════════════════════════════════════════════════════════════
 ```
 
@@ -257,6 +271,8 @@ When complete:
 ### 6.1 Create the kind cluster
 
 ```bash
+export KIND_EXPERIMENTAL_PROVIDER=podman
+
 kind create cluster \
   --name issue-app \
   --config kind/kind-cluster.yaml
@@ -363,13 +379,13 @@ kubectl describe certificate -n issue-app issue-tracker-tls-cert
 
 ### 6.8 Verify the direct Kind port mappings
 
-Kind maps macOS ports `8080` and `8443` to the Envoy listeners in the control-plane
+Kind maps macOS ports `80` and `443` to the Envoy listeners in the control-plane
 container. No `kubectl port-forward` process is required:
 
 ```bash
 ./scripts/helm-deploy.sh check
-curl -I http://localhost:8080/       # 301 to https://localhost:8443/
-curl -k https://localhost:8443/      # frontend HTML
+curl -I http://sample-app.kind.local/     # 301 to HTTPS
+curl -k https://sample-app.kind.local/    # frontend HTML
 ```
 
 ### 6.9 Trust the self-signed certificate (optional)
@@ -393,13 +409,13 @@ sudo cp /tmp/issue-tracker-ca.crt /usr/local/share/ca-certificates/issue-tracker
 sudo update-ca-certificates
 
 # curl — skip verification for testing
-curl -k https://localhost:8443/
+curl -k https://sample-app.kind.local/
 ```
 
 ### 6.10 Open the application
 
 ```
-https://localhost:8443
+https://sample-app.kind.local
 ```
 
 Login: `admin@example.com` / `Admin1234!`
@@ -421,7 +437,7 @@ Login: `admin@example.com` / `Admin1234!`
 | `db.password` | `devpassword123` | MySQL password |
 | `mysql.enabled` | `true` | `false` in prod (use RDS) |
 | `gatewayAPI.enabled` | `true` | `false` to fall back to nginx Ingress |
-| `gatewayAPI.hostname` | `localhost` | DNS name for Gateway listeners + Certificate |
+| `gatewayAPI.hostname` | `sample-app.kind.local` | DNS name for Gateway listeners + Certificate |
 | `gatewayAPI.httpRedirect` | `true` | Redirect HTTP → HTTPS |
 | `gatewayAPI.apiPrefix` | `/api` | Path prefix stripped before forwarding to gateway |
 | `tls.enabled` | `true` | Create cert-manager Certificate |
@@ -438,10 +454,10 @@ Override at deploy time with `--set`:
 helm upgrade issue-tracker helm/issue-tracker -n issue-app \
   --set jwt.secret="MyProductionJWTSecretLongEnough32!"
 
-# Use a custom hostname (add to /etc/hosts: 127.0.0.1 issue-tracker.local)
+# Use a different custom hostname and update /etc/hosts to match
 helm upgrade issue-tracker helm/issue-tracker -n issue-app \
   --set gatewayAPI.hostname="issue-tracker.local" \
-  --set apiGateway.cors.allowedOrigin="https://issue-tracker.local:8443"
+  --set apiGateway.cors.allowedOrigin="https://issue-tracker.local"
 
 # Switch to letsencrypt-staging (requires real DNS + public IP)
 helm upgrade issue-tracker helm/issue-tracker -n issue-app \
@@ -516,7 +532,7 @@ Envoy proxy for this release. For kind, it sets:
 
 - `envoyService.type: NodePort` — exposes Envoy on the kind node's network
 - `envoyDeployment.patch` — adds `hostPort: 80` and `hostPort: 443` to the Envoy
-  container, so kind's `extraPortMappings` (host:8080→node:80, host:8443→node:443)
+  container, so kind's `extraPortMappings` (host:80→node:80, host:443→node:443)
   route traffic directly into the Envoy pods
 
 ### 8.4 URLRewrite filter
@@ -622,7 +638,7 @@ kubectl get svc -n issue-app \
 
 ```bash
 # Login (HTTPS — -k skips cert verification for self-signed)
-TOKEN=$(curl -sk -X POST https://localhost:8443/api/auth/login \
+TOKEN=$(curl -sk -X POST https://sample-app.kind.local/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"Admin1234!"}' \
   | jq -r '.accessToken')
@@ -630,24 +646,24 @@ TOKEN=$(curl -sk -X POST https://localhost:8443/api/auth/login \
 echo "Token: ${TOKEN:0:50}..."
 
 # HTTP → HTTPS redirect
-curl -v http://localhost:8080/api/auth/login 2>&1 | grep "< HTTP\|< Location"
-# expected: HTTP/1.1 301 and Location: https://localhost:8443/api/auth/login
+curl -v http://sample-app.kind.local/api/auth/login 2>&1 | grep "< HTTP\|< Location"
+# expected: HTTP/1.1 301 and Location: https://sample-app.kind.local/api/auth/login
 
 # Create an issue
-curl -sk -X POST https://localhost:8443/api/issues \
+curl -sk -X POST https://sample-app.kind.local/api/issues \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"title":"HTTPS smoke test","priority":"HIGH","severity":"MEDIUM"}'
 
 # List issues
-curl -sk "https://localhost:8443/api/issues" \
+curl -sk "https://sample-app.kind.local/api/issues" \
   -H "Authorization: Bearer $TOKEN" | jq '.content[].title'
 ```
 
 ### 10.3 Open UI
 
 ```
-https://localhost:8443
+https://sample-app.kind.local
 ```
 
 Accept the self-signed certificate warning, or import the CA cert (Section 6.9).
@@ -678,7 +694,7 @@ kubectl rollout status  -n issue-app deploy/auth-service
 ```bash
 helm upgrade issue-tracker helm/issue-tracker -n issue-app \
   --reuse-values \
-  --set apiGateway.cors.allowedOrigin="https://issue-tracker.local:8443"
+  --set apiGateway.cors.allowedOrigin="https://issue-tracker.local"
 ```
 
 ### Verify the gateway after a terminal restart
@@ -818,7 +834,7 @@ Developer push / Pull Request
           │
           ▼
   ┌──────────────────┐
-  │  16. DAST Audit  │  ← OWASP ZAP against https://localhost:8443
+  │  16. DAST Audit  │  ← OWASP ZAP against https://sample-app.kind.local
   └──────────────────┘
 ```
 
@@ -1112,7 +1128,7 @@ See v2 README Section 10.9 for full flags, output formats, caching, and secret s
 
 ### 13.10 SonarQube, Quality Gate, DAST
 
-Unchanged from v3. DAST in v4 runs against `https://localhost:8443` (the Envoy Gateway
+Unchanged from v3. DAST in v4 runs against `https://sample-app.kind.local` (the Envoy Gateway
 HTTPS endpoint):
 
 ```bash
@@ -1122,7 +1138,7 @@ HTTPS endpoint):
 # Baseline scan (use -k to skip cert verification for self-signed)
 docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
   zap-baseline.py \
-  -t https://localhost:8443 \
+  -t https://sample-app.kind.local \
   -z "-config network.connection.tlsProtocols.sslv2=false" \
   -r zap-v4-report.html \
   -I
@@ -1130,7 +1146,7 @@ docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
 # API scan against the gateway
 docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
   zap-api-scan.py \
-  -t https://localhost:8443/api \
+  -t https://sample-app.kind.local/api \
   -f openapi \
   -r zap-v4-api-report.html
 ```
@@ -1157,7 +1173,7 @@ docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
 | 14 | **Trivy image** | CI — image scan | OS packages + libs + secrets in layers | Yes (HIGH/CRIT) |
 | 15 | **SonarQube** | CI — analysis | All services + frontend | Yes |
 | 16 | **Quality Gate** | CI — gate | SonarQube metric thresholds | Yes |
-| 17 | **DAST Audit** | Post-deploy staging | https://localhost:8443 (Envoy GW + TLS) | Blocks promotion |
+| 17 | **DAST Audit** | Post-deploy staging | https://sample-app.kind.local (Envoy GW + TLS) | Blocks promotion |
 
 ---
 
@@ -1367,11 +1383,11 @@ jobs:
       - name: Verify Envoy Gateway
         run: |
           curl -ksf --retry 30 --retry-delay 5 --retry-all-errors \
-            https://localhost:8443/api/actuator/health
+            https://sample-app.kind.local/api/actuator/health
       - name: OWASP ZAP — HTTPS baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target: https://localhost:8443
+          target: https://sample-app.kind.local
           cmd_options: "-z '-config network.connection.tlsProtocols.sslv2=false'"
           fail_action: true
 ```

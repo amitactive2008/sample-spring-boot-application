@@ -31,8 +31,9 @@ ENVOY_GW_VERSION="v1.2.1"
 CERT_MANAGER_VERSION="v1.15.3"
 
 # Host ports (must match kind/kind-cluster.yaml extraPortMappings)
-HTTP_HOST_PORT=8080
-HTTPS_HOST_PORT=8443
+HTTP_HOST_PORT=80
+HTTPS_HOST_PORT=443
+APP_HOST="sample-app.kind.local"
 
 # Podman qualifies unregistered image names with localhost/. The Helm values
 # use the same names so imagePullPolicy=Never resolves the pre-loaded images.
@@ -119,12 +120,15 @@ fi
 
 # ── Gateway verification ──────────────────────────────────────────────────────
 verify_gateway() {
-  info "Waiting for Envoy Gateway at https://localhost:${HTTPS_HOST_PORT}..."
+  info "Waiting for Envoy Gateway at https://${APP_HOST}..."
   for attempt in $(seq 1 36); do
-    if curl -ksf --max-time 5 "https://localhost:${HTTPS_HOST_PORT}/" >/dev/null 2>&1; then
+    if curl -ksf --noproxy '*' --max-time 5 \
+      --resolve "${APP_HOST}:${HTTPS_HOST_PORT}:127.0.0.1" \
+      "https://${APP_HOST}/" >/dev/null 2>&1; then
       ok "HTTPS frontend is reachable."
-      curl -ksf --max-time 10 \
-        "https://localhost:${HTTPS_HOST_PORT}/api/actuator/health" >/dev/null \
+      curl -ksf --noproxy '*' --max-time 10 \
+        --resolve "${APP_HOST}:${HTTPS_HOST_PORT}:127.0.0.1" \
+        "https://${APP_HOST}/api/actuator/health" >/dev/null \
         || die "Frontend is reachable, but the API gateway health route failed."
       ok "API gateway health route is reachable."
       return 0
@@ -143,8 +147,8 @@ if [[ "${1:-}" == "check" || "${1:-}" == "pf" ]]; then
   [[ "${1:-}" == "pf" ]] && warn "The 'pf' command is deprecated; direct Kind port mappings are used."
   verify_gateway
   echo ""
-  echo "  HTTP  →  http://localhost:${HTTP_HOST_PORT}   (redirects to HTTPS)"
-  echo "  HTTPS →  https://localhost:${HTTPS_HOST_PORT}"
+  echo "  HTTP  →  http://${APP_HOST}   (redirects to HTTPS)"
+  echo "  HTTPS →  https://${APP_HOST}"
   exit 0
 fi
 
@@ -274,13 +278,13 @@ cat <<EOF
   Issue Tracker — running on kind with HTTPS!
 ════════════════════════════════════════════════════════════
 
-  Frontend  →  https://localhost:${HTTPS_HOST_PORT}
-  API       →  https://localhost:${HTTPS_HOST_PORT}/api
-  HTTP      →  http://localhost:${HTTP_HOST_PORT}  (redirects → HTTPS)
+  Frontend  →  https://${APP_HOST}
+  API       →  https://${APP_HOST}/api
+  HTTP      →  http://${APP_HOST}  (redirects → HTTPS)
 
   TLS: self-signed certificate from cert-manager
   Browser will show "untrusted" warning — click "Advanced → Proceed".
-  To suppress the warning, import the CA cert (see README Section 6.5).
+  To suppress the warning, import the CA cert (see README Section 6.9).
 
   Admin credentials:
     Email   :  admin@example.com
@@ -296,7 +300,7 @@ cat <<EOF
     helm upgrade ${RELEASE_NAME} ${CHART_DIR} -n ${NAMESPACE} \\
       --set jwt.secret='my-secret' \\
       --set admin.email='me@example.com' \\
-      --set gatewayAPI.hostname='issue-tracker.local'
+      --set gatewayAPI.hostname='sample-app.kind.local'
 
   Tear down:
     ./scripts/helm-deploy.sh teardown

@@ -25,7 +25,7 @@ spec:
 
 ---
 # EnvoyProxy: configure the Envoy proxy deployment for this Gateway.
-# Using NodePort + hostPort lets the kind extraPortMappings (80→8080, 443→8443)
+# Using NodePort + hostPort lets the kind extraPortMappings (80→80, 443→443)
 # forward host traffic directly into the Envoy pods running on the kind node.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
@@ -40,7 +40,7 @@ spec:
     kubernetes:
       envoyService:
         # NodePort exposes the Envoy proxy on all nodes; kind's extraPortMappings
-        # map node port 80→hostPort 8080 and node port 443→hostPort 8443.
+        # map node ports 80/443 to the same ports on the development machine.
         type: NodePort
       envoyDeployment:
         # Patch the Envoy container to bind hostPort on the kind node.
