@@ -53,6 +53,8 @@ REPO_DIR="${REPO_DIR:-$(pwd)}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 REPORT_DIR="/tmp/pipeline-reports/${TIMESTAMP}"
 NVD_API_KEY="${NVD_API_KEY:-}"
+NVD_DATA_DIR="${NVD_DATA_DIR:-}"
+NVD_PLUGIN_VERSION="${NVD_PLUGIN_VERSION:-12.2.2}"
 APP_URL="${APP_URL:-http://sample-app.kind.local}"
 SKIP_SONAR=false
 SKIP_DAST=false
@@ -100,6 +102,8 @@ while [[ $# -gt 0 ]]; do
         *)              echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+NVD_DATA_DIR="${NVD_DATA_DIR:-${REPO_DIR}/.security-cache/dependency-check}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLORS
@@ -571,20 +575,53 @@ step_build() {
 # 12.6d  NVD CHECK
 # ─────────────────────────────────────────────────────────────────────────────
 step_nvd() {
-    local plugin="org.owasp:dependency-check-maven:10.0.3:check"
+    local plugin="org.owasp:dependency-check-maven:${NVD_PLUGIN_VERSION}"
     local failed=0
+    mkdir -p "$NVD_DATA_DIR"
+    chmod 0700 "$NVD_DATA_DIR"
+
     if [[ -z "$NVD_API_KEY" ]]; then
-        log_warn "NVD_API_KEY not set — first run downloads full NVD DB (~10-30 min)"
+        log_warn "NVD_API_KEY not set — NVD updates may be heavily rate-limited"
         log_warn "Set: export NVD_API_KEY=... (free key at nvd.nist.gov/developers/request-an-api-key)"
     fi
-    local opts=(-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON)
+
+    local update_args=(
+        "${plugin}:update-only"
+        "-DdataDirectory=${NVD_DATA_DIR}"
+        -DversionCheckEnabled=false
+        -B
+        --no-transfer-progress
+    )
     if [[ -n "$NVD_API_KEY" ]]; then
         export ODC_NVD_API_KEY="$NVD_API_KEY"
-        opts+=("-DnvdApiKeyEnvironmentVariable=ODC_NVD_API_KEY")
+        update_args+=("-DnvdApiKeyEnvironmentVariable=ODC_NVD_API_KEY")
     fi
+
+    if [[ -f "${NVD_DATA_DIR}/odc.mv.db" ]]; then
+        log_info "Incrementally updating cached NVD database: $NVD_DATA_DIR"
+    else
+        log_info "Initializing NVD database on first run: $NVD_DATA_DIR"
+        log_warn "The initial download can take 10–30 minutes; later runs are incremental"
+    fi
+
+    if mvnw auth-service "${update_args[@]}" 2>&1; then
+        date -u +'%Y-%m-%dT%H:%M:%SZ' > "${NVD_DATA_DIR}/last-successful-update.txt"
+        log_ok "Shared NVD database update completed"
+    else
+        log_error "NVD database update failed; dependency scans were not run"
+        return 1
+    fi
+
     for svc in auth-service issue-service api-gateway; do
-        log_info "NVD scan: $svc..."
-        if mvnw "$svc" "$plugin" "${opts[@]}" -B --no-transfer-progress 2>&1; then
+        log_info "NVD scan from refreshed local database: $svc..."
+        if mvnw "$svc" "${plugin}:check" \
+            "-DdataDirectory=${NVD_DATA_DIR}" \
+            -DautoUpdate=false \
+            -DversionCheckEnabled=false \
+            -DfailBuildOnCVSS=7 \
+            -DskipTestScope=true \
+            -Dformats=HTML,JSON \
+            -B --no-transfer-progress 2>&1; then
             log_ok "$svc: no CVSS≥7 vulnerabilities"
         else
             log_error "$svc: HIGH/CRITICAL CVEs — ${REPO_DIR}/${svc}/target/dependency-check-report.html"

@@ -1158,10 +1158,8 @@ cd auth-service  && ./mvnw clean package -DskipTests -B && cd ..
 cd issue-service && ./mvnw clean package -DskipTests -B && cd ..
 cd api-gateway   && ./mvnw clean package -DskipTests -B && cd ..
 
-# NVD Check
-cd auth-service  && ./mvnw dependency-check:check && cd ..
-cd issue-service && ./mvnw dependency-check:check && cd ..
-cd api-gateway   && ./mvnw dependency-check:check && cd ..
+# NVD Check — update the shared database once, then scan all services offline
+./security-pipeline.sh --skip-sonar --skip-dast --skip-build
 cd frontend-service && npm audit --audit-level=high && cd ..
 
 # Lint
@@ -1622,6 +1620,23 @@ amitactive2008_sample-spring-boot-application_frontend-service
 
 The script does not start a SonarQube container in cloud mode. It reads the token
 from the process environment and does not write it into reports.
+
+#### Persistent NVD database
+
+Dependency-Check `12.2.2` stores its database under:
+
+```text
+.security-cache/dependency-check/
+```
+
+On the first pipeline run, `update-only` initializes the complete database. On every
+later run, the same command updates only new or changed NVD records. After that single
+update, `auth-service`, `issue-service`, and `api-gateway` are scanned with
+`autoUpdate=false`, so they reuse the refreshed local database without downloading it
+three times. The script writes `last-successful-update.txt` after a successful refresh.
+
+Do not delete `.security-cache/dependency-check` unless you intentionally want a complete
+rebuild. The entire `.security-cache/` directory is ignored by Git.
 
 | Option | Description |
 |---|---|
