@@ -17,8 +17,8 @@
 #   12.6  Lint            — ESLint (React) + SpotBugs (Java)
 #   12.7  Podman Build    — build container images
 #   12.7  Trivy image     — image CVE + secret scan
-#   12.8  SonarQube       — deep quality & security analysis
-#   12.8  Quality Gate    — SonarQube merge gate
+#   12.8  Sonar           — deep quality & security analysis
+#   12.8  Quality Gate    — Sonar merge gate
 #   12.9  DAST            — OWASP ZAP against the running kind cluster
 #
 # Usage:
@@ -26,7 +26,7 @@
 #   ./security-pipeline.sh [OPTIONS]
 #
 # Options:
-#   --skip-sonar      Skip steps 12.8 SonarQube + Quality Gate
+#   --skip-sonar      Skip steps 12.8 Sonar + Quality Gate
 #   --skip-dast       Skip step  12.9 DAST (requires kind cluster running)
 #   --skip-build      Skip Maven Build + Podman Build (use cached JARs/images)
 #   --skip-install    Abort if a tool is missing instead of installing it
@@ -38,8 +38,8 @@
 #   # Quick pre-commit check (~2 min)
 #   ./security-pipeline.sh --skip-sonar --skip-dast --skip-build
 #
-#   # Full pipeline with NVD key
-#   ./security-pipeline.sh --nvd-key $NVD_API_KEY
+#   # Full pipeline; reads NVD_API_KEY and SONAR_TOKEN from the environment
+#   ./security-pipeline.sh
 #
 #   # DAST against the running kind cluster
 #   ./security-pipeline.sh --skip-build --skip-sonar --app-url http://sample-app.kind.local
@@ -58,10 +58,18 @@ SKIP_SONAR=false
 SKIP_DAST=false
 SKIP_BUILD=false
 SKIP_INSTALL=false
-SONAR_HOST="http://localhost:9000"
-SONAR_ADMIN_PASS="PipelineAdmin@1234"
-SONAR_PROJECT_KEY="issue-tracker-v3"
+SONAR_MODE="${SONAR_MODE:-local}"
+SONAR_HOST_URL="${SONAR_HOST_URL:-}"
+SONAR_ORGANIZATION="${SONAR_ORGANIZATION:-}"
+SONAR_PROJECT_KEY_PREFIX="${SONAR_PROJECT_KEY_PREFIX:-issue-tracker-v3}"
 SONAR_TOKEN="${SONAR_TOKEN:-}"
+
+case "$SONAR_MODE" in
+    cloud) SONAR_HOST_URL="${SONAR_HOST_URL:-https://sonarcloud.io}" ;;
+    local) SONAR_HOST_URL="${SONAR_HOST_URL:-http://localhost:9000}" ;;
+    external) [[ -n "$SONAR_HOST_URL" ]] || { echo "SONAR_HOST_URL is required for external mode" >&2; exit 2; } ;;
+    *) echo "Invalid SONAR_MODE: $SONAR_MODE (expected cloud, local, or external)" >&2; exit 2 ;;
+esac
 
 # Images built with Podman (localhost/ prefix is required — see README §6.3)
 IMAGES=(
@@ -121,7 +129,7 @@ STEP_NAMES=(
     "Lint              ESLint + SpotBugs"
     "Podman Build      Container Images"
     "Trivy Image       Image CVE Scan"
-    "SonarQube         Quality Analysis"
+    "Sonar             Quality Analysis"
     "Quality Gate      Merge/Deploy Gate"
     "DAST              ZAP vs Kind Cluster"
 )
@@ -569,12 +577,14 @@ step_nvd() {
         log_warn "NVD_API_KEY not set — first run downloads full NVD DB (~10-30 min)"
         log_warn "Set: export NVD_API_KEY=... (free key at nvd.nist.gov/developers/request-an-api-key)"
     fi
-    local opts="-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON"
-    [[ -n "$NVD_API_KEY" ]] && opts+=" -DnvdApiKey=${NVD_API_KEY}"
+    local opts=(-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON)
+    if [[ -n "$NVD_API_KEY" ]]; then
+        export ODC_NVD_API_KEY="$NVD_API_KEY"
+        opts+=("-DnvdApiKeyEnvironmentVariable=ODC_NVD_API_KEY")
+    fi
     for svc in auth-service issue-service api-gateway; do
         log_info "NVD scan: $svc..."
-        # shellcheck disable=SC2086
-        if mvnw "$svc" "$plugin" $opts -B --no-transfer-progress 2>&1; then
+        if mvnw "$svc" "$plugin" "${opts[@]}" -B --no-transfer-progress 2>&1; then
             log_ok "$svc: no CVSS≥7 vulnerabilities"
         else
             log_error "$svc: HIGH/CRITICAL CVEs — ${REPO_DIR}/${svc}/target/dependency-check-report.html"
@@ -675,60 +685,39 @@ step_trivy_image() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.8a  SONARQUBE
+# 12.8a  SONAR
 # ─────────────────────────────────────────────────────────────────────────────
 step_sonar() {
-    local free_mb; free_mb=$(vm_stat 2>/dev/null | awk '/Pages free/{print int($3)*4096/1048576}' || echo 9999)
-    if [[ $free_mb -lt 1500 ]]; then
-        log_error "Only ~${free_mb}MB free RAM — SonarQube needs ~1.5GB. Use --skip-sonar."; return 1
+    [[ -n "$SONAR_TOKEN" ]] || { log_error "SONAR_TOKEN is required for $SONAR_MODE mode"; return 1; }
+    [[ -n "$SONAR_PROJECT_KEY_PREFIX" ]] || { log_error "SONAR_PROJECT_KEY_PREFIX is required"; return 1; }
+    if [[ "$SONAR_MODE" == "cloud" && -z "$SONAR_ORGANIZATION" ]]; then
+        log_error "SONAR_ORGANIZATION is required for cloud mode"; return 1
     fi
-    podman machine ssh "sudo sysctl -w vm.max_map_count=262144" 2>/dev/null || true
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^sonarqube$"; then
-        log_info "Starting SonarQube container..."
-        podman run -d --name sonarqube --memory 2g --restart unless-stopped \
-            -p 9000:9000 -v sonarqube_data:/opt/sonarqube/data sonarqube:community 2>&1
-    else
-        log_info "SonarQube already running"
-    fi
-    log_info "Waiting for SonarQube (up to 5 min)..."
-    local waited=0
-    until curl -sf "${SONAR_HOST}/api/system/status" 2>/dev/null | grep -q '"status":"UP"'; do
-        sleep 5; waited=$(( waited + 5 ))
-        [[ $waited -ge 300 ]] && { log_error "SonarQube not ready after 300s"; return 1; }
-        printf "."
-    done; echo ""
-    log_ok "SonarQube UP at ${SONAR_HOST}"
 
-    curl -sf -u admin:admin -X POST "${SONAR_HOST}/api/users/change_password" \
-        -d "login=admin&previousPassword=admin&password=${SONAR_ADMIN_PASS}" &>/dev/null || true
+    export SONAR_TOKEN
+    log_info "Using ${SONAR_MODE} analysis at ${SONAR_HOST_URL}; token remains in the environment"
 
-    if [[ -z "$SONAR_TOKEN" ]]; then
-        curl -sf -u "admin:${SONAR_ADMIN_PASS}" -X POST "${SONAR_HOST}/api/user_tokens/revoke" \
-            -d "login=admin&name=pipeline-v3-token" &>/dev/null || true
-        SONAR_TOKEN=$(curl -sf -u "admin:${SONAR_ADMIN_PASS}" \
-            -X POST "${SONAR_HOST}/api/user_tokens/generate" \
-            -d "login=admin&name=pipeline-v3-token&type=GLOBAL_ANALYSIS_TOKEN" \
-            | jq -r '.token' 2>/dev/null || echo "")
-    fi
-    [[ -z "$SONAR_TOKEN" ]] && { log_error "Failed to get SonarQube token"; return 1; }
-    echo "$SONAR_TOKEN" > "${REPORT_DIR}/sonar-token.txt"
-    log_ok "Token acquired"
-
-    local failed=0
-    for svc in auth-service issue-service api-gateway; do
-        local key="${SONAR_PROJECT_KEY}-${svc}"
-        curl -sf -u "admin:${SONAR_ADMIN_PASS}" -X POST "${SONAR_HOST}/api/projects/create" \
-            -d "project=${key}&name=Issue+Tracker+v3+-+${svc}" &>/dev/null || true
-        log_info "Analysing $svc..."
-        if mvnw "$svc" "org.sonarsource.scanner.maven:sonar-maven-plugin:sonar" \
-            -Dsonar.host.url="$SONAR_HOST" -Dsonar.token="$SONAR_TOKEN" \
-            -Dsonar.projectKey="$key" -B --no-transfer-progress 2>&1; then
+    local failed=0 svc key
+    for svc in auth-service issue-service api-gateway frontend-service; do
+        key="${SONAR_PROJECT_KEY_PREFIX}_${svc}"
+        local sonar_args=("-Dsonar.host.url=${SONAR_HOST_URL}" "-Dsonar.projectKey=${key}")
+        [[ -n "$SONAR_ORGANIZATION" ]] && sonar_args+=("-Dsonar.organization=${SONAR_ORGANIZATION}")
+        log_info "Analysing $svc as $key..."
+        if [[ "$svc" == "frontend-service" ]]; then
+            sonar_args+=("-Dsonar.sources=src" "-Dsonar.exclusions=build/**,node_modules/**,.scannerwork/**")
+            if (cd "${REPO_DIR}/frontend-service" && npx --yes @sonar/scan@4.3.5 "${sonar_args[@]}" 2>&1); then
+                log_ok "$svc: submitted"
+            else
+                log_error "$svc: analysis failed"; failed=$(( failed + 1 ))
+            fi
+        elif mvnw "$svc" "org.sonarsource.scanner.maven:sonar-maven-plugin:sonar" \
+            "${sonar_args[@]}" -B --no-transfer-progress 2>&1; then
             log_ok "$svc: submitted"
         else
             log_error "$svc: analysis failed"; failed=$(( failed + 1 ))
         fi
     done
-    log_info "UI: ${SONAR_HOST}  login: admin / ${SONAR_ADMIN_PASS}"
+    log_info "Dashboard: ${SONAR_HOST_URL}/projects"
     [[ $failed -eq 0 ]]
 }
 
@@ -736,17 +725,15 @@ step_sonar() {
 # 12.8b  QUALITY GATE
 # ─────────────────────────────────────────────────────────────────────────────
 step_gate() {
-    [[ -z "$SONAR_TOKEN" && -f "${REPORT_DIR}/sonar-token.txt" ]] \
-        && SONAR_TOKEN=$(cat "${REPORT_DIR}/sonar-token.txt")
-    [[ -z "$SONAR_TOKEN" ]] && { log_error "No SonarQube token — did step 12.8a pass?"; return 1; }
-    local failed=0
-    for svc in auth-service issue-service api-gateway; do
-        local key="${SONAR_PROJECT_KEY}-${svc}"
+    [[ -n "$SONAR_TOKEN" ]] || { log_error "No Sonar token — did step 12.8a pass?"; return 1; }
+    local failed=0 svc key
+    for svc in auth-service issue-service api-gateway frontend-service; do
+        key="${SONAR_PROJECT_KEY_PREFIX}_${svc}"
         log_info "Quality Gate: $svc..."
         local attempts=0 status=""
         while [[ $attempts -lt 36 ]]; do
-            status=$(curl -sf -u "${SONAR_TOKEN}:" \
-                "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${key}" \
+            status=$(printf 'Authorization: Bearer %s\n' "$SONAR_TOKEN" | curl -sf -H @- \
+                "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${key}" \
                 | jq -r '.projectStatus.status' 2>/dev/null || echo "")
             [[ "$status" =~ ^(OK|ERROR|WARN|NONE)$ ]] && break
             sleep 5; attempts=$(( attempts + 1 )); printf "."
@@ -754,8 +741,8 @@ step_gate() {
         case "$status" in
             OK)    log_ok   "$svc: Gate PASSED" ;;
             ERROR) log_error "$svc: Gate FAILED"
-                   curl -sf -u "${SONAR_TOKEN}:" \
-                       "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${key}" \
+                   printf 'Authorization: Bearer %s\n' "$SONAR_TOKEN" | curl -sf -H @- \
+                       "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${key}" \
                        | jq -r '.projectStatus.conditions[]|select(.status=="ERROR")|"    \(.metricKey): \(.actualValue) (threshold: \(.errorThreshold))"' \
                        2>/dev/null || true
                    failed=$(( failed + 1 )) ;;
@@ -763,7 +750,7 @@ step_gate() {
             *)     log_warn "$svc: result unavailable" ;;
         esac
     done
-    log_info "Dashboard: ${SONAR_HOST}/projects"
+    log_info "Dashboard: ${SONAR_HOST_URL}/projects"
     [[ $failed -eq 0 ]]
 }
 
@@ -855,7 +842,7 @@ main() {
     echo -e "  ${DIM}Repository : ${REPO_DIR}${NC}"
     echo -e "  ${DIM}App URL    : ${APP_URL}${NC}"
     echo -e "  ${DIM}Started    : $(date)${NC}"
-    [[ "$SKIP_SONAR" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  SonarQube + Quality Gate: SKIPPED"
+    [[ "$SKIP_SONAR" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  Sonar + Quality Gate: SKIPPED"
     [[ "$SKIP_DAST"  == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  DAST: SKIPPED"
     [[ "$SKIP_BUILD" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  Maven Build + Podman Build: SKIPPED"
     echo ""
@@ -894,7 +881,7 @@ main() {
         $images_ok && run_step "trivy_image" || skip_step "trivy_image"  "Podman Build failed"
     fi
 
-    # ── SonarQube ───────────────────────────────────────────────────────────
+    # ── Sonar ───────────────────────────────────────────────────────────────
     if [[ "$SKIP_SONAR" == "true" ]]; then
         skip_step "sonar" "--skip-sonar flag"
         skip_step "gate"  "--skip-sonar flag"
@@ -903,7 +890,7 @@ main() {
         [[ "$(get_status build)" == "PASS" || "$SKIP_BUILD" == "true" ]] && build_ok=true
         if $build_ok; then
             run_step "sonar"
-            [[ "$(get_status sonar)" == "PASS" ]] && run_step "gate" || skip_step "gate" "SonarQube failed"
+            [[ "$(get_status sonar)" == "PASS" ]] && run_step "gate" || skip_step "gate" "Sonar analysis failed"
         else
             skip_step "sonar" "Maven Build failed"
             skip_step "gate"  "Maven Build failed"

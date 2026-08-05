@@ -752,7 +752,7 @@ kind delete cluster --name issue-app
 ## 12. Security & Code Quality Pipeline
 
 v3 inherits the **entire security pipeline from v2** (Gitleaks, Hadolint, Checkstyle,
-Semgrep, Maven Build, NVD Check, Lint, Trivy image + config, SonarQube, Quality Gate,
+Semgrep, Maven Build, NVD Check, Lint, Trivy image + config, Sonar, Quality Gate,
 DAST) and adds **two Kubernetes-specific layers**:
 
 - **Kubesec** — security risk scoring of Kubernetes manifests
@@ -1203,13 +1203,11 @@ and `.trivyignore` suppression configuration.
 
 ---
 
-### 12.8 SonarQube and Quality Gate
+### 12.8 SonarCloud and Quality Gate
 
-Unchanged from v2. Run Maven Sonar analysis after the build step, then poll the Quality
-Gate result.
-
-Refer to v2 README Sections 10.10–10.11 for SonarQube Docker setup, project properties,
-analysis commands, and gate condition table.
+Load the SonarCloud variables documented in Section 13.3. The pipeline submits the
+three Maven services and React frontend as separate projects, then polls each Quality
+Gate. Cloud mode does not create a local SonarQube container.
 
 ---
 
@@ -1260,8 +1258,8 @@ docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
 | 10 | **Lint** | CI | ESLint (React) + SpotBugs (Java) | Yes |
 | 11 | **docker build** | CI — image build | 4 container images | Yes |
 | 12 | **Trivy image** | CI — image scan | OS packages + libs + secrets in layers | Yes (HIGH/CRIT) |
-| 13 | **SonarQube** | CI — analysis | All services + frontend | Yes |
-| 14 | **Quality Gate** | CI — gate | SonarQube metric thresholds | Yes |
+| 13 | **SonarCloud** | CI — analysis | All services + frontend | Yes |
+| 14 | **Quality Gate** | CI — gate | SonarCloud metric thresholds | Yes |
 | 15 | **DAST Audit** | Post-deploy kind | Running cluster via `sample-app.kind.local` | Blocks promotion |
 
 ---
@@ -1523,8 +1521,8 @@ jobs:
 | Secret | Description |
 |---|---|
 | `NVD_API_KEY` | Free from https://nvd.nist.gov/developers/request-an-api-key |
-| `SONAR_HOST` | SonarQube server URL |
-| `SONAR_TOKEN` | SonarQube analysis token |
+| `SONAR_HOST_URL` | Sonar server URL; `https://sonarcloud.io` for SonarCloud |
+| `SONAR_TOKEN` | SonarCloud analysis token |
 
 ---
 
@@ -1548,7 +1546,7 @@ inside the Kind cluster.
 | 12.5 | kube-score — K8s best-practice analysis | **New in v3** |
 | 12.6 | Checkstyle, Semgrep, Maven Build, NVD Check, Lint | — |
 | 12.7 | Podman Build + Trivy image scan | — |
-| 12.8 | SonarQube + Quality Gate | — |
+| 12.8 | SonarCloud + Quality Gate | — |
 | 12.9 | DAST — ZAP against the running kind cluster | **URL: http://sample-app.kind.local** |
 
 > **kubesec note:** The official `kubesec/kubesec:v2` Docker image has no ARM64
@@ -1570,7 +1568,7 @@ The script installs any missing tool automatically via `brew` (macOS) or binary 
 | `semgrep` | Yes — `pip3 install semgrep` | 12.6 |
 | `jq` | Yes — `brew install jq` | JSON parsing |
 | `node` / `npm` | Yes — `brew install node` | 12.6 ESLint |
-| `podman` | Must be installed + machine running | 12.7, 12.8, 12.9 |
+| `podman` | Must be installed + machine running | 12.7, 12.9 |
 | `kubectl` | Must be installed | 12.5 kustomize render |
 | `kubesec` | Public API — no install needed | 12.4 |
 
@@ -1581,14 +1579,58 @@ chmod +x security-pipeline.sh
 ./security-pipeline.sh [OPTIONS]
 ```
 
+#### SonarCloud and NVD credentials
+
+Copy the tracked non-secret template to `.env.sonar.local`. The destination matches
+the repository's `.env.*.local` ignore rule and must never be committed.
+
+```bash
+cp .env.sonar.local.example .env.sonar.local
+chmod 600 .env.sonar.local
+```
+
+For each terminal session, load the non-secret settings and export the two secret
+values only into that shell:
+
+```bash
+export NVD_API_KEY='<your_nvd_api_key>'
+source .env.sonar.local
+export SONAR_TOKEN='<your_sonarcloud_token>'
+
+# Confirm presence without printing either secret
+[[ -n "${NVD_API_KEY:-}" ]] && echo "NVD_API_KEY is set"
+[[ -n "${SONAR_TOKEN:-}" ]] && echo "SONAR_TOKEN is set"
+printf 'Sonar mode=%s host=%s organization=%s\n' \
+  "$SONAR_MODE" "$SONAR_HOST_URL" "$SONAR_ORGANIZATION"
+```
+
+Do not run `echo $SONAR_TOKEN` or place either token in README, shell scripts,
+tracked `.env` files, screenshots, or issue output. Run the complete pipeline with:
+
+```bash
+./security-pipeline.sh
+```
+
+SonarCloud analysis is submitted as four projects:
+
+```text
+amitactive2008_sample-spring-boot-application_auth-service
+amitactive2008_sample-spring-boot-application_issue-service
+amitactive2008_sample-spring-boot-application_api-gateway
+amitactive2008_sample-spring-boot-application_frontend-service
+```
+
+The script does not start a SonarQube container in cloud mode. It reads the token
+from the process environment and does not write it into reports.
+
 | Option | Description |
 |---|---|
 | _(no options)_ | Full 15-step pipeline — installs missing tools, runs everything |
-| `--skip-sonar` | Skip SonarQube (12.8) + Quality Gate — saves ~5 min + 1.5 GB RAM |
+| `--skip-sonar` | Skip Sonar analysis (12.8) and its Quality Gate |
 | `--skip-dast` | Skip ZAP scan (12.9) — use when cluster is not deployed |
 | `--skip-build` | Skip Maven Build + Podman Build — use cached JARs/images |
 | `--skip-install` | Abort instead of auto-installing a missing tool |
-| `--nvd-key KEY` | NVD API key (avoids 30-min first-run download) |
+| `--nvd-key KEY` | NVD API key; prefer `NVD_API_KEY` so the value is not stored in shell history |
 | `--app-url URL` | DAST target (default: `http://sample-app.kind.local`) |
 | `--repo DIR` | Repository root (default: current directory) |
 
@@ -1600,14 +1642,14 @@ chmod +x security-pipeline.sh
 ./security-pipeline.sh --skip-sonar --skip-dast --skip-build
 
 # After a code change — full check without slow steps (~15-20 min)
-./security-pipeline.sh --skip-sonar --skip-dast --nvd-key $NVD_API_KEY
+./security-pipeline.sh --skip-sonar --skip-dast
 
 # DAST against running kind cluster
 ./scripts/kind-deploy.sh          # ensure cluster is up
 ./security-pipeline.sh --skip-sonar --app-url http://sample-app.kind.local
 
-# Full pipeline (~30-40 min, requires ~1.5 GB free RAM for SonarQube)
-./security-pipeline.sh --nvd-key $NVD_API_KEY
+# Full pipeline with SonarCloud and the NVD API key (~30-40 min on a cold cache)
+./security-pipeline.sh
 ```
 
 ### 13.5 Where it fits in the v3 workflow
@@ -1617,7 +1659,7 @@ chmod +x security-pipeline.sh
    └─ Gitleaks + Hadolint + Trivy config + Kubesec + kube-score + Semgrep
       Fast feedback before building anything (~2 min)
 
-2. ./security-pipeline.sh --skip-sonar --skip-dast --nvd-key $KEY
+2. ./security-pipeline.sh --skip-sonar --skip-dast
    └─ Full source + build + image scan
 
 3. ./scripts/kind-deploy.sh
@@ -1648,7 +1690,6 @@ Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
 ├── lint.log
 ├── podman_build.log
 ├── trivy-image-*.json         ← per-image CVE findings
-├── sonar-token.txt
 ├── zap-report.html            ← open in browser
 └── zap-report.json
 ```
@@ -1671,7 +1712,7 @@ Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
 ║  ✔  12.6e   Lint              ESLint + SpotBugs       28s  ║
 ║  ✔  12.7a   Podman Build      Container Images       180s  ║
 ║  ✔  12.7b   Trivy Image       Image CVE Scan          35s  ║
-║  ✔  12.8a   SonarQube         Quality Analysis        65s  ║
+║  ✔  12.8a   Sonar             Quality Analysis        65s  ║
 ║  ✔  12.8b   Quality Gate      Merge/Deploy Gate        8s  ║
 ║  ✔  12.9    DAST              ZAP vs Kind Cluster     95s  ║
 ╠════════════════════════════════════════════════════════════╣
@@ -1679,3 +1720,22 @@ Every run writes a timestamped directory under `/tmp/pipeline-reports/`:
 ║  Pass:15  Fail:0  Skip:0  Total:821s                       ║
 ╚════════════════════════════════════════════════════════════╝
 ```
+
+How to read the output:
+
+- `✔ PASSED` means the check ran and met its configured threshold.
+- `✖ FAILED` means the check found a blocking issue or encountered a tool error.
+  The pipeline continues where possible so the summary includes other checks.
+- `— SKIPPED` means an explicit `--skip-*` option or a failed prerequisite kept
+  the check from running. A skipped result is not a passed security check.
+- `⚠` identifies a warning or review item that is non-blocking for that step.
+- Sonar first reports each project as `submitted`. The Quality Gate step then waits
+  for SonarCloud and reports `Gate PASSED`, `Gate FAILED`, or an unavailable result
+  for each backend service and the frontend.
+- Exit status `0` means no blocking step failed. A non-zero status is expected when
+  scanners find vulnerabilities, policy violations, or execution errors.
+
+The `Reports:` line shown during setup and in the final summary identifies the exact
+timestamped directory for the run. Begin with `pipeline.log`, then inspect the JSON,
+HTML, or text report named by the failed step. Sonar and NVD tokens are not written
+to the report directory.
