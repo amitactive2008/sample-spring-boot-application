@@ -170,16 +170,20 @@ kubectl version --client
 helm    version     # v3.x.x
 ```
 
-### 4.2 Docker
+### 4.2 Podman
 
 ```bash
-# macOS — Docker Desktop
-# Linux
-sudo apt install docker.io
-sudo usermod -aG docker $USER   # re-login after
+# macOS
+brew install podman
+podman machine init             # first installation only
+podman machine start
 
-docker info   # must succeed without sudo
+podman info                    # must succeed
 ```
+
+Podman Desktop is optional; the deployment script uses the Podman CLI and its
+machine. Docker Desktop is not required. The script sets
+`KIND_EXPERIMENTAL_PROVIDER=podman` automatically.
 
 ### 4.3 System requirements
 
@@ -207,14 +211,14 @@ What the script does:
 | Step | Action |
 |---|---|
 | 1 | Creates kind cluster `issue-app` from `kind/kind-cluster.yaml` |
-| 2 | Installs Gateway API CRDs (GatewayClass, Gateway, HTTPRoute, …) |
-| 3 | Installs Envoy Gateway controller via Helm in `envoy-gateway-system` |
+| 2 | Installs Envoy Gateway and its compatible Gateway API CRDs via Helm |
+| 3 | Waits for the Envoy Gateway controller in `envoy-gateway-system` |
 | 4 | Installs cert-manager via Helm in `cert-manager`; waits for webhook |
-| 5 | Builds all 4 Docker images |
-| 6 | Loads images into kind |
+| 5 | Builds all 4 container images with Podman |
+| 6 | Saves the Podman images and loads their archives into kind |
 | 7 | `helm upgrade --install` — deploys all app resources + Gateway + Certificate |
 | 8 | Waits for cert-manager to issue the TLS certificate |
-| 9 | Discovers the Envoy proxy Service and starts `kubectl port-forward` |
+| 9 | Verifies the direct Kind HTTP/HTTPS mappings and API health route |
 
 When complete:
 
@@ -244,17 +248,13 @@ kubectl config current-context   # kind-issue-app
 kubectl get nodes                # STATUS: Ready
 ```
 
-### 6.2 Install Gateway API CRDs
+### 6.2 Gateway API CRD ownership
 
-The Gateway API CRDs (`GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute`, etc.) must
-be installed before Envoy Gateway, which registers itself as a `GatewayClass` provider.
-
-```bash
-kubectl apply -f \
-  https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
-
-kubectl get crd | grep gateway   # should list gateway.networking.k8s.io CRDs
-```
+The pinned Envoy Gateway chart includes the compatible Gateway API CRDs
+(`GatewayClass`, `Gateway`, `HTTPRoute`, `GRPCRoute`, etc.). Do not install a
+second CRD bundle with `kubectl`; doing so creates Helm field-ownership conflicts.
+The application chart then creates the `envoy-gateway` GatewayClass that selects
+the installed controller.
 
 ### 6.3 Install Envoy Gateway
 
@@ -301,15 +301,21 @@ kubectl get pods -n cert-manager   # all 3 pods Running
 ### 6.5 Build and load images
 
 ```bash
-docker build -t auth-service:local    ./auth-service
-docker build -t issue-service:local   ./issue-service
-docker build -t api-gateway:local     ./api-gateway
-docker build -t frontend-service:local ./frontend-service
+export KIND_EXPERIMENTAL_PROVIDER=podman
 
-kind load docker-image auth-service:local    --name issue-app
-kind load docker-image issue-service:local   --name issue-app
-kind load docker-image api-gateway:local     --name issue-app
-kind load docker-image frontend-service:local --name issue-app
+podman build -t localhost/auth-service:local     ./auth-service
+podman build -t localhost/issue-service:local    ./issue-service
+podman build -t localhost/api-gateway:local      ./api-gateway
+podman build -t localhost/frontend-service:local ./frontend-service
+
+podman save localhost/auth-service:local \
+  | kind load image-archive /dev/stdin --name issue-app
+podman save localhost/issue-service:local \
+  | kind load image-archive /dev/stdin --name issue-app
+podman save localhost/api-gateway:local \
+  | kind load image-archive /dev/stdin --name issue-app
+podman save localhost/frontend-service:local \
+  | kind load image-archive /dev/stdin --name issue-app
 ```
 
 ### 6.6 Deploy via Helm
@@ -338,21 +344,15 @@ kubectl get certificate -n issue-app -w
 kubectl describe certificate -n issue-app issue-tracker-tls-cert
 ```
 
-### 6.8 Start port-forward to the Envoy proxy
+### 6.8 Verify the direct Kind port mappings
 
-The Envoy proxy Service is created in the `issue-app` namespace and named dynamically by
-Envoy Gateway. The deploy script discovers it automatically:
+Kind maps macOS ports `8080` and `8443` to the Envoy listeners in the control-plane
+container. No `kubectl port-forward` process is required:
 
 ```bash
-# Discover the Envoy Service
-ENVOY_SVC=$(kubectl get svc -n issue-app \
-  --selector="gateway.envoyproxy.io/owning-gateway-name=issue-tracker-gateway" \
-  -o jsonpath='{.items[0].metadata.name}')
-
-echo "Envoy Service: $ENVOY_SVC"
-
-# Start port-forward
-kubectl port-forward -n issue-app "svc/${ENVOY_SVC}" 8080:80 8443:443 &
+./scripts/helm-deploy.sh check
+curl -I http://localhost:8080/       # 301 to https://localhost:8443/
+curl -k https://localhost:8443/      # frontend HTML
 ```
 
 ### 6.9 Trust the self-signed certificate (optional)
@@ -478,7 +478,7 @@ kubectl delete pvc -n issue-app --all
 ### 8.2 Resource hierarchy
 
 ```
-GatewayClass "envoy-gateway"          (cluster-scoped, installed by Envoy GW Helm)
+GatewayClass "envoy-gateway"          (cluster-scoped, managed by this Helm chart)
     └── Gateway "issue-tracker-gateway"  (namespace-scoped, managed by Helm chart)
             ├── Listener: http  (:80)
             │       └── HTTPRoute "...-http-redirect"   → 301 to HTTPS
@@ -492,6 +492,10 @@ GatewayClass "envoy-gateway"          (cluster-scoped, installed by Envoy GW Hel
 
 The `EnvoyProxy` resource in `gateway.yaml` configures how Envoy Gateway provisions the
 Envoy proxy for this release. For kind, it sets:
+
+- a no-surge deployment strategy because a single node cannot reserve the same
+  fixed host ports for old and new Envoy pods at once;
+- host ports `80` and `443` on Envoy's generated listener ports `10080` and `10443`.
 
 - `envoyService.type: NodePort` — exposes Envoy on the kind node's network
 - `envoyDeployment.patch` — adds `hostPort: 80` and `hostPort: 443` to the Envoy
@@ -638,8 +642,9 @@ Accept the self-signed certificate warning, or import the CA cert (Section 6.9).
 ### Rebuild and redeploy a single service
 
 ```bash
-docker build -t auth-service:local ./auth-service
-kind load docker-image auth-service:local --name issue-app
+podman build -t localhost/auth-service:local ./auth-service
+podman save localhost/auth-service:local \
+  | kind load image-archive /dev/stdin --name issue-app
 kubectl rollout restart -n issue-app deploy/auth-service
 kubectl rollout status  -n issue-app deploy/auth-service
 ```
@@ -659,10 +664,10 @@ helm upgrade issue-tracker helm/issue-tracker -n issue-app \
   --set apiGateway.cors.allowedOrigin="https://issue-tracker.local:8443"
 ```
 
-### Restart the port-forward after a terminal restart
+### Verify the gateway after a terminal restart
 
 ```bash
-./scripts/helm-deploy.sh pf
+./scripts/helm-deploy.sh check
 ```
 
 ### View resource consumption
@@ -693,15 +698,12 @@ kubectl describe httproute -n issue-app issue-tracker-gateway-https-routes
 
 ```bash
 ./scripts/helm-deploy.sh teardown
-# Stops port-forward, deletes the kind cluster
+# Deletes the kind cluster and all workloads in it
 ```
 
 Manual:
 
 ```bash
-# Stop port-forward
-kill $(cat /tmp/issue-tracker-pf.pid)
-
 # Uninstall Helm release (removes app resources)
 helm uninstall issue-tracker -n issue-app
 
@@ -1097,8 +1099,8 @@ Unchanged from v3. DAST in v4 runs against `https://localhost:8443` (the Envoy G
 HTTPS endpoint):
 
 ```bash
-# Ensure cluster and port-forward are running
-./scripts/helm-deploy.sh pf
+# Ensure the cluster and direct gateway mappings are healthy
+./scripts/helm-deploy.sh check
 
 # Baseline scan (use -k to skip cert verification for self-signed)
 docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
@@ -1321,7 +1323,6 @@ jobs:
         run: |
           go install sigs.k8s.io/kind@latest
           kind create cluster --name $CLUSTER_NAME --config kind/kind-cluster.yaml
-          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
           helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
             --version v1.2.1 -n envoy-gateway-system --create-namespace --wait
           helm repo add jetstack https://charts.jetstack.io
@@ -1346,13 +1347,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Start port-forward to Envoy proxy
+      - name: Verify Envoy Gateway
         run: |
-          ENVOY_SVC=$(kubectl get svc -n $NAMESPACE \
-            --selector="gateway.envoyproxy.io/owning-gateway-name=issue-tracker-gateway" \
-            -o jsonpath='{.items[0].metadata.name}')
-          kubectl port-forward -n $NAMESPACE "svc/${ENVOY_SVC}" 8443:443 &
-          sleep 3
+          curl -ksf --retry 30 --retry-delay 5 --retry-all-errors \
+            https://localhost:8443/api/actuator/health
       - name: OWASP ZAP — HTTPS baseline scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
@@ -1405,7 +1403,7 @@ chmod +x security-pipeline.sh
 
 ```
 1. ./security-pipeline.sh --skip-dast      ← run before building images
-2. docker build / kind load docker-image
+2. podman build / podman save / kind load image-archive
 3. helm upgrade --install issue-tracker ./helm/issue-tracker -f values.yaml
 4. ./security-pipeline.sh --skip-sonar     ← DAST against the live cluster
    --app-url http://localhost:8080

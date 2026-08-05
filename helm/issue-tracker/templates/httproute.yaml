@@ -30,6 +30,7 @@ spec:
         - type: RequestRedirect
           requestRedirect:
             scheme: https
+            port: {{ .Values.gatewayAPI.externalHttpsPort }}
             statusCode: 301      # permanent redirect — browsers cache this
 {{- end }}
 

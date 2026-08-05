@@ -4,17 +4,20 @@
 #                  using Helm + Envoy Gateway + cert-manager (HTTPS)
 #
 # Prerequisites (install before running):
-#   brew install kind kubectl helm docker
-#   Docker Desktop (or equivalent) must be running.
+#   brew install kind kubectl helm podman
+#   Podman machine must be running: podman machine start
 #
 # Usage:
 #   ./scripts/helm-deploy.sh              # full deploy  (cluster + infra + app)
 #   ./scripts/helm-deploy.sh upgrade      # rebuild images + helm upgrade only
-#   ./scripts/helm-deploy.sh pf           # (re)start port-forward on existing cluster
+#   ./scripts/helm-deploy.sh check        # verify existing cluster endpoints
 #   ./scripts/helm-deploy.sh lint         # helm lint + dry-run + security checks
 #   ./scripts/helm-deploy.sh teardown     # delete the kind cluster
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+
+# kind's Podman provider is experimental and must be selected explicitly.
+export KIND_EXPERIMENTAL_PROVIDER=podman
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 CLUSTER_NAME="issue-app"
@@ -23,17 +26,22 @@ NAMESPACE="issue-app"
 CHART_DIR="helm/issue-tracker"
 KIND_CLUSTER_CONFIG="kind/kind-cluster.yaml"
 
-GATEWAY_NAME="issue-tracker-gateway"
-GATEWAY_NAMESPACE="${NAMESPACE}"
-
 # Component versions — pin these for reproducible deploys
 ENVOY_GW_VERSION="v1.2.1"
 CERT_MANAGER_VERSION="v1.15.3"
-GATEWAY_API_CRD_VERSION="v1.2.0"
 
 # Host ports (must match kind/kind-cluster.yaml extraPortMappings)
 HTTP_HOST_PORT=8080
 HTTPS_HOST_PORT=8443
+
+# Podman qualifies unregistered image names with localhost/. The Helm values
+# use the same names so imagePullPolicy=Never resolves the pre-loaded images.
+IMAGES=(
+  "localhost/api-gateway:local"
+  "localhost/auth-service:local"
+  "localhost/issue-service:local"
+  "localhost/frontend-service:local"
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 info()  { echo "[INFO]  $*"; }
@@ -43,21 +51,19 @@ die()   { echo "[ERROR] $*" >&2; exit 1; }
 
 # ── Tool validation ───────────────────────────────────────────────────────────
 validate_tools() {
-  for tool in kind kubectl helm docker; do
+  for tool in kind kubectl helm podman curl; do
     command -v "$tool" &>/dev/null || die "'$tool' is not installed. Run: brew install $tool"
   done
-  docker info &>/dev/null || die "Docker is not running. Start Docker Desktop first."
+  podman info &>/dev/null || die "Podman is not running. Start it with: podman machine start"
   [[ -f "$KIND_CLUSTER_CONFIG" ]] || die "kind cluster config not found: $KIND_CLUSTER_CONFIG"
+}
+
+cluster_exists() {
+  podman container exists "${CLUSTER_NAME}-control-plane"
 }
 
 # ── Subcommand: teardown ──────────────────────────────────────────────────────
 if [[ "${1:-}" == "teardown" ]]; then
-  info "Stopping any running port-forwards..."
-  if [[ -f /tmp/issue-tracker-pf.pid ]]; then
-    PF_PID=$(cat /tmp/issue-tracker-pf.pid)
-    kill "$PF_PID" 2>/dev/null && info "  Port-forward (PID $PF_PID) stopped." || true
-    rm -f /tmp/issue-tracker-pf.pid
-  fi
   info "Deleting kind cluster '$CLUSTER_NAME'..."
   kind delete cluster --name "$CLUSTER_NAME"
   ok "Cluster deleted."
@@ -111,54 +117,31 @@ if [[ "${1:-}" == "lint" ]]; then
   exit 0
 fi
 
-# ── Port-forward helper function ──────────────────────────────────────────────
-start_port_forward() {
-  info "Discovering Envoy proxy Service for Gateway '${GATEWAY_NAME}'..."
-
-  local ENVOY_SVC=""
-  for i in $(seq 1 36); do
-    ENVOY_SVC=$(kubectl get svc -n "${GATEWAY_NAMESPACE}" \
-      --selector="gateway.envoyproxy.io/owning-gateway-name=${GATEWAY_NAME}" \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-    [[ -n "$ENVOY_SVC" ]] && break
-    info "  Waiting for Envoy Service... ($i/36, sleeping 5s)"
+# ── Gateway verification ──────────────────────────────────────────────────────
+verify_gateway() {
+  info "Waiting for Envoy Gateway at https://localhost:${HTTPS_HOST_PORT}..."
+  for attempt in $(seq 1 36); do
+    if curl -ksf --max-time 5 "https://localhost:${HTTPS_HOST_PORT}/" >/dev/null 2>&1; then
+      ok "HTTPS frontend is reachable."
+      curl -ksf --max-time 10 \
+        "https://localhost:${HTTPS_HOST_PORT}/api/actuator/health" >/dev/null \
+        || die "Frontend is reachable, but the API gateway health route failed."
+      ok "API gateway health route is reachable."
+      return 0
+    fi
+    info "  Waiting for Envoy listener... (${attempt}/36, sleeping 5s)"
     sleep 5
   done
-
-  [[ -n "$ENVOY_SVC" ]] || die "Envoy Service not found for Gateway '${GATEWAY_NAME}' after 3 min"
-  info "  Found Envoy Service: ${ENVOY_SVC}"
-
-  # Stop any existing port-forward for this release
-  if [[ -f /tmp/issue-tracker-pf.pid ]]; then
-    OLD_PID=$(cat /tmp/issue-tracker-pf.pid)
-    kill "$OLD_PID" 2>/dev/null || true
-    rm -f /tmp/issue-tracker-pf.pid
-  fi
-
-  # Start port-forward in background
-  kubectl port-forward \
-    -n "${GATEWAY_NAMESPACE}" \
-    "svc/${ENVOY_SVC}" \
-    "${HTTP_HOST_PORT}:80" \
-    "${HTTPS_HOST_PORT}:443" \
-    >/tmp/issue-tracker-pf.log 2>&1 &
-  PF_PID=$!
-  echo "${PF_PID}" > /tmp/issue-tracker-pf.pid
-
-  # Give it a moment to establish
-  sleep 2
-  kill -0 "$PF_PID" 2>/dev/null || die "Port-forward failed to start. See /tmp/issue-tracker-pf.log"
-  ok "Port-forward started (PID: ${PF_PID})"
-  info "  Log: /tmp/issue-tracker-pf.log"
-  info "  To stop: kill ${PF_PID}  (or ./scripts/helm-deploy.sh teardown)"
+  die "Envoy Gateway did not become reachable. Check: kubectl get gateway,pods -A"
 }
 
-# ── Subcommand: pf (start/restart port-forward only) ─────────────────────────
-if [[ "${1:-}" == "pf" ]]; then
+# ── Subcommand: check existing deployment ─────────────────────────────────────
+if [[ "${1:-}" == "check" || "${1:-}" == "pf" ]]; then
   validate_tools
   kubectl config use-context "kind-${CLUSTER_NAME}" \
     || die "kind cluster '${CLUSTER_NAME}' not found. Run the full deploy first."
-  start_port_forward
+  [[ "${1:-}" == "pf" ]] && warn "The 'pf' command is deprecated; direct Kind port mappings are used."
+  verify_gateway
   echo ""
   echo "  HTTP  →  http://localhost:${HTTP_HOST_PORT}   (redirects to HTTPS)"
   echo "  HTTPS →  https://localhost:${HTTPS_HOST_PORT}"
@@ -172,7 +155,7 @@ CMD="${1:-deploy}"
 
 # ── 1. Create kind cluster (deploy only) ─────────────────────────────────────
 if [[ "$CMD" == "deploy" ]]; then
-  if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+  if cluster_exists; then
     info "kind cluster '${CLUSTER_NAME}' already exists — skipping creation."
   else
     info "Creating kind cluster '${CLUSTER_NAME}'..."
@@ -181,17 +164,15 @@ if [[ "$CMD" == "deploy" ]]; then
   fi
 fi
 
+if ! cluster_exists; then
+  die "kind cluster '${CLUSTER_NAME}' does not exist. Run './scripts/helm-deploy.sh' first."
+fi
+
 kubectl config use-context "kind-${CLUSTER_NAME}"
 
-# ── 2. Install Gateway API CRDs ───────────────────────────────────────────────
-# Envoy Gateway requires the Gateway API CRDs (GatewayClass, Gateway, HTTPRoute, etc.)
-# to be installed before the Envoy Gateway controller itself.
-info "Installing Gateway API CRDs (${GATEWAY_API_CRD_VERSION})..."
-kubectl apply -f \
-  "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_CRD_VERSION}/standard-install.yaml"
-ok "Gateway API CRDs installed."
-
-# ── 3. Install Envoy Gateway via Helm ─────────────────────────────────────────
+# ── 2. Install Envoy Gateway and its compatible Gateway API CRDs ──────────────
+# The pinned chart owns both Envoy Gateway and Gateway API CRDs. Installing a
+# second CRD bundle with kubectl causes Helm field-manager conflicts.
 if ! kubectl get ns envoy-gateway-system &>/dev/null 2>&1 || [[ "$CMD" == "upgrade" ]]; then
   info "Installing Envoy Gateway (${ENVOY_GW_VERSION})..."
   helm upgrade --install envoy-gateway \
@@ -206,7 +187,7 @@ else
   info "Envoy Gateway already installed — skipping."
 fi
 
-# ── 4. Install cert-manager via Helm ──────────────────────────────────────────
+# ── 3. Install cert-manager via Helm ──────────────────────────────────────────
 if ! kubectl get ns cert-manager &>/dev/null 2>&1 || [[ "$CMD" == "upgrade" ]]; then
   info "Installing cert-manager (${CERT_MANAGER_VERSION})..."
   helm repo add jetstack https://charts.jetstack.io --force-update >/dev/null
@@ -230,23 +211,33 @@ kubectl wait deployment/cert-manager-webhook \
   --timeout=60s
 ok "cert-manager webhook is ready."
 
-# ── 5. Build Docker images ────────────────────────────────────────────────────
-info "Building Docker images..."
-docker build -t api-gateway:local      ./api-gateway
-docker build -t auth-service:local     ./auth-service
-docker build -t issue-service:local    ./issue-service
-docker build -t frontend-service:local ./frontend-service
+# ── 4. Build container images with Podman ─────────────────────────────────────
+info "Building container images with Podman..."
+podman build -t localhost/api-gateway:local       ./api-gateway
+podman build -t localhost/auth-service:local      ./auth-service
+podman build -t localhost/issue-service:local     ./issue-service
+podman build -t localhost/frontend-service:local  ./frontend-service
 ok "Images built."
 
-# ── 6. Load images into kind ──────────────────────────────────────────────────
+# ── 5. Load images into kind ──────────────────────────────────────────────────
 info "Loading images into kind cluster '${CLUSTER_NAME}'..."
-kind load docker-image api-gateway:local      --name "$CLUSTER_NAME"
-kind load docker-image auth-service:local     --name "$CLUSTER_NAME"
-kind load docker-image issue-service:local    --name "$CLUSTER_NAME"
-kind load docker-image frontend-service:local --name "$CLUSTER_NAME"
+IMAGE_ARCHIVE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/issue-tracker-images.XXXXXX")
+cleanup_image_archives() {
+  rm -rf "$IMAGE_ARCHIVE_DIR"
+}
+trap cleanup_image_archives EXIT
+
+for image in "${IMAGES[@]}"; do
+  archive_name=${image#localhost/}
+  archive_name=${archive_name//[:\/]/-}
+  archive_path="${IMAGE_ARCHIVE_DIR}/${archive_name}.tar"
+  info "  Loading ${image}..."
+  podman save --output "$archive_path" "$image"
+  kind load image-archive "$archive_path" --name "$CLUSTER_NAME"
+done
 ok "Images loaded."
 
-# ── 7. Helm install / upgrade ─────────────────────────────────────────────────
+# ── 6. Helm install / upgrade ─────────────────────────────────────────────────
 info "Running helm upgrade --install '${RELEASE_NAME}'..."
 helm upgrade --install "$RELEASE_NAME" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
@@ -257,7 +248,7 @@ helm upgrade --install "$RELEASE_NAME" "$CHART_DIR" \
 
 ok "Helm release '${RELEASE_NAME}' deployed."
 
-# ── 8. Wait for cert-manager to issue the TLS certificate ─────────────────────
+# ── 7. Wait for cert-manager to issue the TLS certificate ─────────────────────
 info "Waiting for cert-manager to issue TLS certificate (up to 2 min)..."
 for i in $(seq 1 24); do
   CERT_READY=$(kubectl get certificate -n "${NAMESPACE}" \
@@ -273,8 +264,8 @@ else
   warn "Certificate not ready after 2 min — check: kubectl describe certificate -n ${NAMESPACE}"
 fi
 
-# ── 9. Start port-forward ─────────────────────────────────────────────────────
-start_port_forward
+# ── 8. Verify the direct Kind port mappings ───────────────────────────────────
+verify_gateway
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 cat <<EOF

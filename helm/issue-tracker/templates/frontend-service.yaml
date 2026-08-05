@@ -30,6 +30,8 @@ spec:
             # also sets it at build time via ARG.
             - name: REACT_APP_API_BASE_URL
               value: {{ .Values.frontendService.apiBaseUrl | quote }}
+            - name: NODE_OPTIONS
+              value: {{ .Values.frontendService.nodeOptions | quote }}
           resources:
             {{- toYaml .Values.frontendService.resources | nindent 12 }}
 

@@ -2,16 +2,26 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # gateway.yaml — Envoy Gateway resources
 #
-# Two resources are created:
-#   1. EnvoyProxy  — configures how Envoy Gateway provisions the Envoy proxy
+# Three resources are created:
+#   1. GatewayClass — selects the Envoy Gateway controller.
+#   2. EnvoyProxy  — configures how Envoy Gateway provisions the Envoy proxy
 #                    Deployment/Service for this release (NodePort + hostPort
 #                    so kind's extraPortMappings route traffic to localhost).
-#   2. Gateway     — declares the HTTP and HTTPS listeners; references the
+#   3. Gateway     — declares the HTTP and HTTPS listeners; references the
 #                    TLS Secret created by cert-manager.
-#
-# The GatewayClass "envoy-gateway" is installed cluster-wide by the Envoy
-# Gateway Helm chart and is NOT created here.
 # ──────────────────────────────────────────────────────────────────────────────
+
+---
+# Envoy Gateway installs the controller and CRDs, but applications create the
+# GatewayClass that selects that controller.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gatewayAPI.gatewayClassName }}
+  labels:
+    {{- include "issue-tracker.labels" . | nindent 4 }}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
 
 ---
 # EnvoyProxy: configure the Envoy proxy deployment for this Gateway.
@@ -40,15 +50,28 @@ spec:
           type: StrategicMerge
           value:
             spec:
+              # A single-node kind cluster cannot schedule two Envoy pods that
+              # both reserve node ports 80/443. Stop the old pod before
+              # creating its replacement.
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxSurge: 0
+                  maxUnavailable: 1
               template:
                 spec:
                   containers:
                     - name: envoy
                       ports:
-                        - containerPort: {{ .Values.gatewayAPI.httpPort }}
+                        # Envoy Gateway renders listener 80 on container port
+                        # 10080 and listener 443 on 10443. Bind the kind node's
+                        # ports to those real listeners.
+                        - name: http-80
+                          containerPort: 10080
                           hostPort: {{ .Values.gatewayAPI.httpPort }}
                           protocol: TCP
-                        - containerPort: {{ .Values.gatewayAPI.httpsPort }}
+                        - name: https-443
+                          containerPort: 10443
                           hostPort: {{ .Values.gatewayAPI.httpsPort }}
                           protocol: TCP
 
@@ -65,7 +88,7 @@ metadata:
     # Tell cert-manager which ClusterIssuer to use for the HTTPS listener's TLS cert.
     cert-manager.io/cluster-issuer: {{ include "issue-tracker.clusterIssuerName" . | quote }}
 spec:
-  # Reference the GatewayClass installed by Envoy Gateway's Helm chart.
+  # Reference the GatewayClass created above for the Envoy controller.
   gatewayClassName: {{ .Values.gatewayAPI.gatewayClassName }}
 
   # Point the proxy config defined above at this Gateway.

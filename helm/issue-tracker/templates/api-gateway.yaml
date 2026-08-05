@@ -25,6 +25,13 @@ spec:
           ports:
             - containerPort: {{ .Values.apiGateway.port }}
           env:
+            # Kubernetes Services expose both backends on service port 80.
+            # The application defaults remain compatible with container-compose
+            # networking, where the services listen directly on 8097/8098.
+            - name: AUTH_SERVICE_URL
+              value: "http://auth-service:80"
+            - name: ISSUE_SERVICE_URL
+              value: "http://issue-service:80"
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

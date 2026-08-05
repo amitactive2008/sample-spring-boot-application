@@ -1,16 +1,16 @@
 
-# API GATEWAY - Production (Docker) Routes
+# API GATEWAY - Production container routes
 
 spring:
   cloud:
     gateway:
       routes:
         - id: auth-service
-          uri: http://auth-service:8097
+          uri: ${AUTH_SERVICE_URL:http://auth-service:8097}
           predicates:
             - Path=/auth/**
 
         - id: issue-service
-          uri: http://issue-service:8098
+          uri: ${ISSUE_SERVICE_URL:http://issue-service:8098}
           predicates:
             - Path=/issues/**

@@ -1,0 +1,43 @@
+# macOS and editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*~
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Java / Maven build output
+**/target/
+*.class
+
+# Node / React dependencies and generated output
+**/node_modules/
+frontend-service/build/
+frontend-service/coverage/
+
+# Security and quality scanner caches/reports
+.security-cache/
+.verify/
+security-reports/
+**/.scannerwork/
+
+# Runtime and tool logs
+*.log
+*.pid
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test and coverage output
+**/surefire-reports/
+**/failsafe-reports/
+*.exec
+
+# Temporary files
+*.tmp
+*.swp
+*.swo

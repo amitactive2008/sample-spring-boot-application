@@ -40,6 +40,8 @@ spec:
                 secretKeyRef:
                   name: auth-service-secrets
                   key: SPRING_DATASOURCE_PASSWORD
+            - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+              value: {{ .Values.db.ddlAuto | quote }}
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

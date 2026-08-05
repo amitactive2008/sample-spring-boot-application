@@ -10,7 +10,7 @@
 # ── Global ────────────────────────────────────────────────────────────────────
 global:
   namespace: issue-app
-  # "Never"        → kind: images are pre-loaded with `kind load docker-image`
+  # "Never"        → kind: images are pre-loaded with `kind load image-archive`
   # "IfNotPresent" → cloud: pull from registry only if not already cached
   # "Always"       → always pull (CI/CD deploys where tag may change)
   imagePullPolicy: Never
@@ -34,6 +34,9 @@ db:
   name: "game_db"
   username: "game_admin"
   password: "devpassword123"
+  # Local MySQL starts empty; let Hibernate create/update the study schema.
+  # Production overrides this to validate so application startup never mutates it.
+  ddlAuto: update
 
 # ── In-cluster MySQL ──────────────────────────────────────────────────────────
 # Set enabled=false in prod and point db.host at your RDS endpoint.
@@ -55,7 +58,7 @@ mysql:
 # ── API Gateway (Spring Cloud Gateway / WebFlux, port 8096) ──────────────────
 apiGateway:
   image:
-    repository: api-gateway
+    repository: localhost/api-gateway
     tag: local
   replicas: 1
   port: 8096
@@ -74,7 +77,7 @@ apiGateway:
 # ── Auth Service (Spring Boot 4, port 8097) ───────────────────────────────────
 authService:
   image:
-    repository: auth-service
+    repository: localhost/auth-service
     tag: local
   replicas: 1
   port: 8097
@@ -93,7 +96,7 @@ authService:
 # ── Issue Service (Spring Boot 4, port 8098) ──────────────────────────────────
 issueService:
   image:
-    repository: issue-service
+    repository: localhost/issue-service
     tag: local
   replicas: 1
   port: 8098
@@ -111,21 +114,21 @@ issueService:
 # ── Frontend Service (React 19 dev server, port 3000) ─────────────────────────
 frontendService:
   image:
-    repository: frontend-service
+    repository: localhost/frontend-service
     tag: local
   replicas: 1
   port: 3000
-  # "/api" is a relative path — the React app (served at http://localhost:8080)
-  # will make XHR calls to http://localhost:8080/api/...
-  # The nginx ingress strips the /api prefix before forwarding to the gateway.
+  # "/api" is a relative path — the React app uses the same HTTPS origin as
+  # the browser. The Envoy HTTPRoute strips /api before forwarding to the gateway.
   apiBaseUrl: "/api"
+  nodeOptions: "--max-old-space-size=512"
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
       cpu: 200m
-      memory: 256Mi
+      memory: 1Gi
 
 # ── Legacy nginx Ingress (v3 compatibility) ───────────────────────────────────
 # Disabled when gatewayAPI.enabled=true.  Enable for plain nginx Ingress mode.
@@ -147,9 +150,9 @@ ingress:
 # Set enabled=false to fall back to the nginx Ingress above.
 gatewayAPI:
   enabled: true
-  # Name of the Gateway resource — also used to discover the Envoy proxy Service.
+  # Name of the Gateway resource.
   gatewayName: issue-tracker-gateway
-  # GatewayClass installed by Envoy Gateway's Helm chart.
+  # GatewayClass created by this application chart for the Envoy controller.
   gatewayClassName: envoy-gateway
   # Hostname the Gateway and Certificate are bound to.
   # Use "localhost" for local kind dev; set to the real domain in prod.
@@ -160,6 +163,8 @@ gatewayAPI:
   httpsPort: 443
   # HTTP→HTTPS redirect: all plain HTTP requests are redirected to HTTPS.
   httpRedirect: true
+  # Public HTTPS port used in redirects. Local kind maps host 8443 to listener 443.
+  externalHttpsPort: 8443
   # /api prefix is stripped before the request reaches api-gateway
   # (same behaviour as the nginx rewrite-target annotation in v3).
   apiPrefix: "/api"

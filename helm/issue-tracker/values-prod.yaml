@@ -33,6 +33,7 @@ db:
   name: "game_db"
   username: ""  # set via --set db.username
   password: ""  # set via --set db.password
+  ddlAuto: validate
 
 # ── ECR image repositories ────────────────────────────────────────────────────
 apiGateway:
