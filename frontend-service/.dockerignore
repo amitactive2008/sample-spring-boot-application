@@ -1,0 +1,9 @@
+node_modules/
+build/
+coverage/
+.scannerwork/
+.env
+.env.*
+*.log
+.DS_Store
+

@@ -48,6 +48,7 @@ verify_helm() {
 
 verify_shell() {
   bash -n \
+    "${repository_root}/security-pipeline.sh" \
     "${repository_root}/scripts/helm-deploy.sh" \
     "${repository_root}/scripts/verify.sh"
   echo "Shell syntax checks passed"

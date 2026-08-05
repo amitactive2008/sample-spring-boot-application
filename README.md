@@ -758,7 +758,138 @@ Helm and the new infrastructure components:
 - **`helm lint`** — Helm chart syntax and best-practice validation
 - **Helm template + kubesec / kube-score** — render the chart, then scan rendered manifests
 - **Trivy config extended** — scans the `helm/` directory for Helm chart misconfigurations
-- **Checkov** — policy-as-code scanner with Helm/Kubernetes rules
+
+### Run `security-pipeline.sh`
+
+Run the pipeline from the repository root. The script checks source code, the Helm
+chart and rendered Kubernetes manifests, Java and JavaScript dependencies,
+container images, Sonar quality gates, and the deployed application.
+
+```bash
+# Confirm the script and its options
+./security-pipeline.sh --help
+
+# Configure credentials in the current shell; never add them to a tracked file
+export SONAR_TOKEN="replace-with-your-sonarcloud-token"
+export NVD_API_KEY="replace-with-your-nvd-api-key"
+
+# SonarCloud identity for this repository
+export SONAR_MODE=cloud
+export SONAR_HOST_URL=https://sonarcloud.io
+export SONAR_ORGANIZATION=amitactive2008
+export SONAR_PROJECT_KEY_PREFIX=amitactive2008_sample-spring-boot-application
+
+# Full scan, including SonarCloud and DAST
+./security-pipeline.sh
+```
+
+The full scan can take a long time on its first run because Maven, Trivy, Semgrep,
+container images, and the NVD vulnerability database may need to be downloaded.
+Each service has a `.dockerignore` so generated Maven output, `node_modules`, React
+build output, scanner state, and local environment files are not copied into the
+Podman build context. Trivy uses the Podman machine socket when available, avoiding
+large temporary image archives; it falls back to a temporary archive on other
+Podman installations.
+Run the Kind deployment before enabling DAST:
+
+```bash
+./scripts/helm-deploy.sh check
+```
+
+Common scan modes:
+
+```bash
+# Source and configuration checks only; no NVD, build, Sonar, or DAST
+./security-pipeline.sh --skip-nvd --skip-build --skip-sonar --skip-dast
+
+# Build, dependency, lint, and image checks without SonarCloud or DAST
+./security-pipeline.sh --skip-sonar --skip-dast
+
+# Reuse cached images/classes but still incrementally update NVD and scan dependencies
+./security-pipeline.sh --skip-build --skip-sonar --skip-dast
+
+# CI or pre-provisioned workstation: fail instead of installing missing tools
+./security-pipeline.sh --skip-install --skip-sonar --skip-dast
+```
+
+Supported options:
+
+| Option | Effect |
+|---|---|
+| `--skip-nvd` | Skip the NVD update, Java Dependency-Check scans, and npm audit |
+| `--skip-sonar` | Skip Sonar analysis and its quality gate |
+| `--skip-dast` | Skip the OWASP ZAP scan |
+| `--skip-build` | Skip Maven builds, lint, Podman builds, and image scans; NVD still runs |
+| `--skip-install` | Do not install missing command-line tools |
+| `--nvd-key KEY` | Supply an NVD API key; prefer the `NVD_API_KEY` environment variable so it is not stored in shell history |
+| `--nvd-data-dir DIR` | Override the persistent Dependency-Check database directory |
+| `--sonar-mode MODE` | Select `cloud`, `local`, or `external` Sonar operation |
+| `--sonar-host URL` | Override the Sonar server URL |
+| `--sonar-org KEY` | Set the SonarCloud organization key |
+| `--sonar-project-prefix KEY` | Set the prefix used for the four per-service project keys |
+| `--app-url URL` | Set the deployed application URL used by DAST |
+| `--repo DIR` | Scan a repository directory other than the current directory |
+
+The NVD step uses this persistent local database:
+
+```text
+.security-cache/dependency-check/
+```
+
+It performs one incremental database update, then scans `auth-service`,
+`issue-service`, and `api-gateway` with network updates disabled. The frontend npm
+audit uses the same pipeline step but writes its own JSON report.
+
+Each run writes logs and machine-readable reports to:
+
+```text
+security-reports/YYYYMMDD-HHMMSS/
+├── nvd/
+│   ├── auth-service/
+│   ├── issue-service/
+│   ├── api-gateway/
+│   └── npm-audit.json
+├── helm-rendered.yaml
+├── kubesec.json
+├── kube-score.txt
+├── trivy-config.json
+├── trivy-image-*.json
+├── semgrep-*.json
+└── pipeline.log
+```
+
+SonarCloud uses four project keys derived from the configured prefix:
+
+```text
+amitactive2008_sample-spring-boot-application_auth-service
+amitactive2008_sample-spring-boot-application_issue-service
+amitactive2008_sample-spring-boot-application_api-gateway
+amitactive2008_sample-spring-boot-application_frontend-service
+```
+
+The Sonar token stays in the process environment and is not written to a report.
+The token must be authorized to analyze these projects in the
+`amitactive2008` organization.
+`SONAR_MODE=local` targets an already-running SonarQube server; the pipeline does
+not create a SonarQube container or generate administrator credentials.
+
+Kubesec runs locally in the official `kubesec/kubesec:v2` container. On Apple
+Silicon, Podman uses amd64 emulation because that image does not publish an arm64
+variant. Rendered Kubernetes manifests are not uploaded to the public Kubesec API.
+
+Operational notes:
+
+- The default DAST target is `https://sample-app.kind.local`; deploy the Kind
+  environment and add the documented `/etc/hosts` entry first.
+- The development certificate is self-signed. The pipeline accepts it only for
+  the local DAST preflight and configures the ZAP container for the development
+  endpoint.
+- A summary with skipped checks is a partial scan, even if the remaining checks
+  pass; do not treat that result as a complete release approval.
+
+Never commit `NVD_API_KEY`, `SONAR_TOKEN`, application credentials, generated
+reports, or scanner caches. `.gitignore` excludes `.security-cache/`,
+`security-reports/`, and `.scannerwork/` directories.
 
 ```
 Developer push / Pull Request
@@ -812,7 +943,7 @@ Developer push / Pull Request
   └──────┬───────┘
           ▼
   ┌─────────────────────┐
-  │  12. docker build   │  ← build all 4 images
+  │  12. Podman build   │  ← build all 4 images
   └──────────┬──────────┘
           ▼
   ┌──────────────────┐
@@ -1027,72 +1158,7 @@ apply identically to the Helm templates.
 
 ---
 
-### 13.7 Checkov — Policy-as-Code for Helm & Terraform
-
-**What it is:**
-Checkov by Bridgecrew is an open-source static analysis tool that checks IaC files —
-including Helm charts, Kubernetes YAML, Terraform, Dockerfiles, and GitHub Actions
-workflows — against a library of 1,000+ security and compliance policies mapped to CIS
-benchmarks, NIST, PCI-DSS, and HIPAA.
-
-**SDLC value:**
-Checkov understands Helm natively — it renders the chart and then checks the rendered
-manifests against its K8s policy library. This catches the same issues as kubesec and
-kube-score but with richer compliance framework mappings and policy suppression controls.
-It is especially useful when you need to demonstrate CIS Kubernetes benchmark compliance.
-
-**How to apply:**
-
-Install:
-```bash
-pip install checkov
-# or
-brew install checkov
-```
-
-Scan the Helm chart:
-```bash
-# Scan with default values
-checkov -d helm/issue-tracker --framework helm
-
-# Scan + render with specific values
-checkov -d helm/issue-tracker \
-  --framework helm \
-  --var-file helm/issue-tracker/values.yaml
-
-# Scan Dockerfiles
-checkov -d . --framework dockerfile
-
-# Scan rendered K8s manifests
-helm template issue-tracker helm/issue-tracker --namespace issue-app \
-  > /tmp/rendered.yaml
-checkov -f /tmp/rendered.yaml --framework kubernetes
-```
-
-Fail CI on HIGH/CRITICAL only:
-```bash
-checkov -d helm/issue-tracker \
-  --framework helm \
-  --check HIGH,CRITICAL \
-  --compact \
-  --output cli \
-  --output-file-path /tmp/checkov-report
-```
-
-Create `.checkov.yaml` to suppress accepted findings:
-
-```yaml
-# .checkov.yaml
-skip-check:
-  # CKV_K8S_28: HEALTHCHECK not applicable to K8s Deployments (applies to Dockerfiles)
-  - CKV_K8S_28
-  # CKV_K8S_43: Image tag not pinned — acceptable for local dev (using :local)
-  - CKV_K8S_43
-```
-
----
-
-### 13.8 Checkstyle, Semgrep, Maven Build, NVD Check, Lint
+### 13.7–13.11 Checkstyle, Semgrep, Maven Build, NVD Check, Lint
 
 Unchanged from v3. See v3 README Section 12.6 for full configuration.
 
@@ -1106,7 +1172,7 @@ semgrep --config p/spring-security --config p/java \
 
 ---
 
-### 13.9 Trivy Image Scan
+### 13.12–13.13 Podman Build and Trivy Image Scan
 
 Unchanged from v3. Build and scan all four images before loading into kind:
 
@@ -1126,29 +1192,18 @@ See v2 README Section 10.9 for full flags, output formats, caching, and secret s
 
 ---
 
-### 13.10 SonarQube, Quality Gate, DAST
+### 13.14–13.16 SonarCloud, Quality Gate, DAST
 
-Unchanged from v3. DAST in v4 runs against `https://sample-app.kind.local` (the Envoy Gateway
-HTTPS endpoint):
+DAST runs against `https://sample-app.kind.local`, the Envoy Gateway HTTPS
+endpoint. The pipeline discovers the Kind node address, attaches ZAP to the Kind
+network, maps the hostname, and accepts only the local self-signed certificate:
 
 ```bash
 # Ensure the cluster and direct gateway mappings are healthy
 ./scripts/helm-deploy.sh check
 
-# Baseline scan (use -k to skip cert verification for self-signed)
-docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
-  zap-baseline.py \
-  -t https://sample-app.kind.local \
-  -z "-config network.connection.tlsProtocols.sslv2=false" \
-  -r zap-v4-report.html \
-  -I
-
-# API scan against the gateway
-docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
-  zap-api-scan.py \
-  -t https://sample-app.kind.local/api \
-  -f openapi \
-  -r zap-v4-api-report.html
+# Run only the deployed-app scan while skipping the expensive analysis phases
+./security-pipeline.sh --skip-nvd --skip-sonar --skip-build
 ```
 
 ---
@@ -1163,17 +1218,16 @@ docker run --rm --network host ghcr.io/zaproxy/zaproxy:stable \
 | 4 | **Trivy config** | CI — pre-build | Dockerfiles + **Helm chart** (`HELM*` + `KSV*` rules) | Yes |
 | 5 | **Kubesec** | CI — rendered manifests | Helm-rendered K8s manifests risk score | Yes (score < 0) |
 | 6 | **kube-score** | CI — rendered manifests | Helm-rendered manifests best-practice | Yes (CRITICAL) |
-| 7 | **Checkov** | CI — policy-as-code | Helm + Dockerfile + K8s policies (CIS/NIST) | Yes (HIGH/CRIT) |
-| 8 | **Checkstyle** | CI — validate | Java source style | Yes |
-| 9 | **Semgrep** | CI — SAST | Java + JS + Dockerfile + K8s patterns | Yes |
-| 10 | **Maven Build** | CI — compile | 3 Spring Boot services | Yes |
-| 11 | **NVD Check** | CI — SCA | JARs + npm packages | Yes (CVSS ≥ 7) |
-| 12 | **Lint** | CI | ESLint (React) + SpotBugs (Java) | Yes |
-| 13 | **docker build** | CI — image build | 4 container images | Yes |
-| 14 | **Trivy image** | CI — image scan | OS packages + libs + secrets in layers | Yes (HIGH/CRIT) |
-| 15 | **SonarQube** | CI — analysis | All services + frontend | Yes |
-| 16 | **Quality Gate** | CI — gate | SonarQube metric thresholds | Yes |
-| 17 | **DAST Audit** | Post-deploy staging | https://sample-app.kind.local (Envoy GW + TLS) | Blocks promotion |
+| 7 | **Checkstyle** | CI — validate | Java source style | Yes |
+| 8 | **Semgrep** | CI — SAST | Java + JS/React | Yes (ERROR) |
+| 9 | **Maven Build** | CI — compile | 3 Spring Boot services | Yes |
+| 10 | **NVD Check** | CI — SCA | JARs + npm packages | Yes (CVSS ≥ 7 / npm high) |
+| 11 | **Lint** | CI | ESLint (React) + SpotBugs (Java) | Yes |
+| 12 | **Podman build** | CI — image build | 4 container images | Yes |
+| 13 | **Trivy image** | CI — image scan | OS packages + application libraries | Yes (HIGH/CRIT) |
+| 14 | **SonarCloud** | CI — analysis | 3 backend services + frontend | Yes |
+| 15 | **Quality Gate** | CI — gate | Four SonarCloud project gates | Yes |
+| 16 | **DAST Audit** | Post-deploy staging | https://sample-app.kind.local (Envoy GW + TLS) | Blocks promotion |
 
 ---
 
@@ -1246,21 +1300,7 @@ jobs:
           chmod +x /usr/local/bin/kube-score
           kube-score score --exit-one-on-error /tmp/rendered.yaml
 
-      # ── 7. Checkov ───────────────────────────────────────────────────────────
-      - name: Checkov — Helm + Dockerfile policy scan
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: .
-          framework: helm,dockerfile,kubernetes
-          check: HIGH,CRITICAL
-          quiet: true
-          output_format: sarif
-          output_file_path: checkov-report.sarif
-      - uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with: { sarif_file: checkov-report.sarif, category: checkov }
-
-      # ── 8 & 10. Checkstyle + Maven Build ─────────────────────────────────────
+      # ── 7 & 9. Checkstyle + Maven Build ──────────────────────────────────────
       - uses: actions/setup-java@v4
         with: { java-version: '17', distribution: 'temurin' }
       - name: Build auth-service (checkstyle + package)

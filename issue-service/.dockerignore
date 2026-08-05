@@ -1,0 +1,7 @@
+target/
+.scannerwork/
+.env
+.env.*
+*.log
+.DS_Store
+

@@ -1,48 +1,56 @@
 #!/usr/bin/env bash
 # =============================================================================
-# security-pipeline.sh  —  Security & Code Quality Pipeline  (v3 / Kind)
-# Issue Tracker v3 | Run on the developer machine or CI agent
+# security-pipeline.sh  —  Security & Code Quality Pipeline  (v4 / Helm + Kind)
+# Issue Tracker v4 | Run on the developer machine or CI agent
 # =============================================================================
 #
-# Pipeline steps (README §12):
-#   12.1  Gitleaks        — secret scanning
-#   12.2  Hadolint        — Dockerfile linting
-#   12.3  Trivy config    — Dockerfiles + docker-compose.yml + Kubernetes YAML
-#   12.4  Kubesec         — K8s manifest security risk scoring  [v3 NEW]
-#   12.5  kube-score      — K8s best-practice analysis          [v3 NEW]
-#   12.6  Checkstyle      — Java code style
-#   12.6  Semgrep         — SAST (Java + JS/React)
-#   12.6  Maven Build     — compile & package all services
-#   12.6  NVD Check       — dependency CVE scanning
-#   12.6  Lint            — ESLint (React) + SpotBugs (Java)
-#   12.7  Podman Build    — build container images
-#   12.7  Trivy image     — image CVE + secret scan
-#   12.8  SonarQube       — deep quality & security analysis
-#   12.8  Quality Gate    — SonarQube merge gate
-#   12.9  DAST            — OWASP ZAP against the running kind cluster
+# Pipeline steps (README §13):
+#   13.1  Gitleaks        — secret scanning
+#   13.2  Hadolint        — Dockerfile linting
+#   13.3  Helm            — chart lint and render
+#   13.4  Trivy config    — Dockerfiles + Helm/Kubernetes configuration
+#   13.5  Kubesec         — rendered Deployment security scoring
+#   13.6  kube-score      — rendered manifest best-practice analysis
+#   13.7  Checkstyle      — Java code style
+#   13.8  Semgrep         — SAST (Java + JS/React)
+#   13.9  Maven Build     — compile and package all services
+#   13.10 NVD Check       — one incremental update, then offline service scans
+#   13.11 Lint            — ESLint + SpotBugs
+#   13.12 Podman Build    — build container images
+#   13.13 Trivy image     — image CVE scan
+#   13.14 SonarCloud      — quality and security analysis
+#   13.15 Quality Gate    — SonarCloud merge gate
+#   13.16 DAST            — OWASP ZAP against the running Kind cluster
 #
 # Usage:
 #   chmod +x security-pipeline.sh
 #   ./security-pipeline.sh [OPTIONS]
 #
 # Options:
-#   --skip-sonar      Skip steps 12.8 SonarQube + Quality Gate
-#   --skip-dast       Skip step  12.9 DAST (requires kind cluster running)
-#   --skip-build      Skip Maven Build + Podman Build (use cached JARs/images)
+#   --skip-nvd        Skip the NVD update, Java dependency scans, and npm audit
+#   --skip-sonar      Skip Sonar analysis and Quality Gate
+#   --skip-dast       Skip DAST (requires the Kind deployment)
+#   --skip-build      Skip Maven and Podman builds; NVD still updates and scans
 #   --skip-install    Abort if a tool is missing instead of installing it
 #   --nvd-key  KEY    NVD API key for faster dependency scan
-#   --app-url  URL    Target URL for DAST (default: http://localhost)
+#   --nvd-data-dir DIR  Persistent NVD database (default: .security-cache/dependency-check)
+#   --sonar-mode MODE   cloud, local, or external (default: cloud)
+#   --sonar-host URL    Sonar server URL
+#   --sonar-org KEY     SonarCloud organization key
+#   --sonar-project-prefix KEY  Prefix for per-service Sonar project keys
+#   --app-url  URL    Target URL for DAST (default: https://sample-app.kind.local)
 #   --repo     DIR    Repo root (default: current directory)
 #
 # Examples:
 #   # Quick pre-commit check (~2 min)
-#   ./security-pipeline.sh --skip-sonar --skip-dast --skip-build
+#   ./security-pipeline.sh --skip-nvd --skip-sonar --skip-dast --skip-build
 #
 #   # Full pipeline with NVD key
 #   ./security-pipeline.sh --nvd-key $NVD_API_KEY
 #
-#   # DAST against the running kind cluster
-#   ./security-pipeline.sh --skip-build --skip-sonar --app-url http://localhost
+#   # SonarCloud + incremental NVD update, without DAST
+#   SONAR_MODE=cloud SONAR_TOKEN=... NVD_API_KEY=... \
+#     ./security-pipeline.sh --skip-dast
 # =============================================================================
 set -uo pipefail
 
@@ -51,17 +59,25 @@ set -uo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-REPORT_DIR="/tmp/pipeline-reports/${TIMESTAMP}"
+REPORT_DIR="${SECURITY_REPORT_DIR:-}"
 NVD_API_KEY="${NVD_API_KEY:-}"
-APP_URL="${APP_URL:-http://localhost}"
+NVD_DATA_DIR="${NVD_DATA_DIR:-}"
+NVD_PLUGIN_VERSION="${NVD_PLUGIN_VERSION:-12.2.2}"
+NVD_FAIL_CVSS="${NVD_FAIL_CVSS:-7}"
+APP_URL="${APP_URL:-https://sample-app.kind.local}"
+SKIP_NVD="${SKIP_NVD:-false}"
 SKIP_SONAR=false
 SKIP_DAST=false
 SKIP_BUILD=false
 SKIP_INSTALL=false
-SONAR_HOST="http://localhost:9000"
-SONAR_ADMIN_PASS="PipelineAdmin@1234"
-SONAR_PROJECT_KEY="issue-tracker-v3"
+SONAR_MODE="${SONAR_MODE:-cloud}"
+SONAR_HOST_URL="${SONAR_HOST_URL:-${SONAR_HOST:-}}"
+SONAR_ORGANIZATION="${SONAR_ORGANIZATION:-amitactive2008}"
+SONAR_PROJECT_KEY_PREFIX="${SONAR_PROJECT_KEY_PREFIX:-amitactive2008_sample-spring-boot-application}"
+SONAR_REGION="${SONAR_REGION:-}"
 SONAR_TOKEN="${SONAR_TOKEN:-}"
+HELM_CHART_DIR=""
+HELM_RENDERED=""
 
 # Images built with Podman (localhost/ prefix is required — see README §6.3)
 IMAGES=(
@@ -71,27 +87,44 @@ IMAGES=(
   "localhost/frontend-service:local"
 )
 
-# kubesec: ARM64 local image is unavailable; use the public API instead
-KUBESEC_API="https://v2.kubesec.io/scan"
 # Minimum acceptable kubesec score (0 = no critical negatives; raise after hardening)
 KUBESEC_MIN_SCORE=0
+KUBESEC_IMAGE="docker.io/kubesec/kubesec:v2"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARGUMENT PARSING
 # ─────────────────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --skip-nvd)     SKIP_NVD=true;       shift ;;
         --skip-sonar)   SKIP_SONAR=true;     shift ;;
         --skip-dast)    SKIP_DAST=true;      shift ;;
         --skip-build)   SKIP_BUILD=true;     shift ;;
         --skip-install) SKIP_INSTALL=true;   shift ;;
-        --nvd-key)      NVD_API_KEY="$2";    shift 2 ;;
-        --app-url)      APP_URL="$2";        shift 2 ;;
-        --repo)         REPO_DIR="$2";       shift 2 ;;
-        -h|--help)      sed -n '2,60p' "$0"; exit 0 ;;
+        --nvd-key)      [[ $# -ge 2 ]] || { echo "--nvd-key requires a value" >&2; exit 2; }; NVD_API_KEY="$2"; shift 2 ;;
+        --nvd-data-dir) [[ $# -ge 2 ]] || { echo "--nvd-data-dir requires a value" >&2; exit 2; }; NVD_DATA_DIR="$2"; shift 2 ;;
+        --sonar-mode)   [[ $# -ge 2 ]] || { echo "--sonar-mode requires a value" >&2; exit 2; }; SONAR_MODE="$2"; shift 2 ;;
+        --sonar-host)   [[ $# -ge 2 ]] || { echo "--sonar-host requires a value" >&2; exit 2; }; SONAR_HOST_URL="$2"; shift 2 ;;
+        --sonar-org)    [[ $# -ge 2 ]] || { echo "--sonar-org requires a value" >&2; exit 2; }; SONAR_ORGANIZATION="$2"; shift 2 ;;
+        --sonar-project-prefix) [[ $# -ge 2 ]] || { echo "--sonar-project-prefix requires a value" >&2; exit 2; }; SONAR_PROJECT_KEY_PREFIX="$2"; shift 2 ;;
+        --app-url)      [[ $# -ge 2 ]] || { echo "--app-url requires a value" >&2; exit 2; }; APP_URL="$2"; shift 2 ;;
+        --repo)         [[ $# -ge 2 ]] || { echo "--repo requires a value" >&2; exit 2; }; REPO_DIR="$2"; shift 2 ;;
+        -h|--help)      sed -n '2,72p' "$0"; exit 0 ;;
         *)              echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+REPORT_DIR="${REPORT_DIR:-${REPO_DIR}/security-reports/${TIMESTAMP}}"
+NVD_DATA_DIR="${NVD_DATA_DIR:-${REPO_DIR}/.security-cache/dependency-check}"
+HELM_CHART_DIR="${REPO_DIR}/helm/issue-tracker"
+HELM_RENDERED="${REPORT_DIR}/helm-rendered.yaml"
+
+case "$SONAR_MODE" in
+    local)    SONAR_HOST_URL="${SONAR_HOST_URL:-http://localhost:9000}" ;;
+    cloud)    SONAR_HOST_URL="${SONAR_HOST_URL:-https://sonarcloud.io}" ;;
+    external) [[ -n "$SONAR_HOST_URL" ]] || { echo "SONAR_HOST_URL is required for external mode" >&2; exit 2; } ;;
+    *) echo "Invalid SONAR_MODE: ${SONAR_MODE} (expected cloud, local, or external)" >&2; exit 2 ;;
+esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COLORS
@@ -106,12 +139,13 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP TRACKING
 # ─────────────────────────────────────────────────────────────────────────────
-STEP_IDS=(   gitleaks  hadolint  trivy_config  kubesec   kube_score  checkstyle  semgrep  build    nvd      lint     podman_build  trivy_image  sonar    gate     dast    )
-STEP_NUMS=(  "12.1"    "12.2"    "12.3"        "12.4"    "12.5"      "12.6a"     "12.6b"  "12.6c"  "12.6d"  "12.6e"  "12.7a"       "12.7b"      "12.8a"  "12.8b"  "12.9"  )
+STEP_IDS=(   gitleaks  hadolint  helm    trivy_config  kubesec  kube_score  checkstyle semgrep build   nvd     lint    podman_build trivy_image sonar   gate    dast    )
+STEP_NUMS=(  "13.1"   "13.2"    "13.3" "13.4"       "13.5"  "13.6"      "13.7"    "13.8"  "13.9" "13.10" "13.11" "13.12"      "13.13"    "13.14" "13.15" "13.16" )
 STEP_NAMES=(
     "Gitleaks          Secret Scanning"
     "Hadolint          Dockerfile Lint"
-    "Trivy Config      Dockerfiles + K8s YAML"
+    "Helm              Lint + Render"
+    "Trivy Config      Dockerfiles + Helm/K8s"
     "Kubesec           K8s Manifest Scoring"
     "kube-score        K8s Best-Practice"
     "Checkstyle        Java Code Style"
@@ -121,12 +155,12 @@ STEP_NAMES=(
     "Lint              ESLint + SpotBugs"
     "Podman Build      Container Images"
     "Trivy Image       Image CVE Scan"
-    "SonarQube         Quality Analysis"
+    "Sonar             Quality Analysis"
     "Quality Gate      Merge/Deploy Gate"
     "DAST              ZAP vs Kind Cluster"
 )
-STEP_STATUS=(  "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" )
-STEP_ELAPSED=( "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" )
+STEP_STATUS=(  "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" "-" )
+STEP_ELAPSED=( "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" "0" )
 
 PIPELINE_START=$(date +%s)
 MAIN_LOG=""
@@ -207,9 +241,19 @@ mvnw() {
     "${REPO_DIR}/${svc}/mvnw" -f "${REPO_DIR}/${svc}/pom.xml" "$@"
 }
 
+sonar_project_key() {
+    local svc="$1"
+    if [[ "$SONAR_MODE" == "local" ]]; then
+        echo "${SONAR_PROJECT_KEY_PREFIX}-${svc}"
+    else
+        echo "${SONAR_PROJECT_KEY_PREFIX}_${svc}"
+    fi
+}
+
 setup_tools() {
     log_banner "Setup — checking tools"
     mkdir -p "$REPORT_DIR"
+    chmod 0700 "$REPORT_DIR"
     MAIN_LOG="${REPORT_DIR}/pipeline.log"
     touch "$MAIN_LOG"
     echo "Started:    $(date)"        >> "$MAIN_LOG"
@@ -221,42 +265,37 @@ setup_tools() {
     log_info "App URL    : ${APP_URL}"
     log_info "Reports    : ${REPORT_DIR}"
 
+    local setup_failed=0
     install_if_missing "gitleaks" "command -v gitleaks" \
         'GL=$(curl -sf https://api.github.com/repos/gitleaks/gitleaks/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)[\"tag_name\"].lstrip(\"v\"))")
          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_$(uname -s | tr A-Z a-z)_x64.tar.gz" \
-           | tar -xz -C /usr/local/bin gitleaks'
-    install_if_missing "hadolint"   "command -v hadolint"   "brew install hadolint"
-    install_if_missing "trivy"      "command -v trivy"      "brew install trivy"
-    install_if_missing "semgrep"    "command -v semgrep"    "pip3 install semgrep --quiet"
-    install_if_missing "kube-score" "command -v kube-score" "brew install kube-score"
-    install_if_missing "jq"         "command -v jq"         "brew install jq"
-    install_if_missing "node/npm"   "command -v npm"        "brew install node"
-
-    # kubesec: no ARM64 image — verify public API is reachable instead
-    if curl -sf --max-time 5 "https://v2.kubesec.io/scan" -X POST \
-        -H "Content-Type: application/json" \
-        -d '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"test"}}' &>/dev/null; then
-        log_ok "kubesec: public API reachable (https://v2.kubesec.io/scan)"
-    else
-        log_warn "kubesec: public API not reachable — step 12.4 will be skipped"
-    fi
+           | tar -xz -C /usr/local/bin gitleaks' || setup_failed=1
+    install_if_missing "hadolint"   "command -v hadolint"   "brew install hadolint" || setup_failed=1
+    install_if_missing "trivy"      "command -v trivy"      "brew install trivy" || setup_failed=1
+    install_if_missing "semgrep"    "command -v semgrep"    "pip3 install semgrep --quiet" || setup_failed=1
+    install_if_missing "helm"       "command -v helm"       "brew install helm" || setup_failed=1
+    install_if_missing "kube-score" "command -v kube-score" "brew install kube-score" || setup_failed=1
+    install_if_missing "jq"         "command -v jq"         "brew install jq" || setup_failed=1
+    install_if_missing "node/npm"   "command -v npm"        "brew install node" || setup_failed=1
 
     if ! command -v podman &>/dev/null; then
         log_error "podman: not found — install with: brew install podman"
-        return 1
+        setup_failed=1
+    else
+        log_ok "podman: $(podman --version)"
     fi
-    log_ok "podman: $(podman --version)"
 
+    [[ $setup_failed -eq 0 ]] || { log_error "One or more required tools are unavailable"; return 1; }
     log_ok "All tools ready"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.1  GITLEAKS
+# 13.1  GITLEAKS
 # ─────────────────────────────────────────────────────────────────────────────
 step_gitleaks() {
     local report="${REPORT_DIR}/gitleaks.json"
     cat > "${REPORT_DIR}/.gitleaks.toml" << 'TOML'
-title = "Issue Tracker v3 Gitleaks"
+title = "Issue Tracker v4 Gitleaks"
 [allowlist]
 description = "Placeholder values in docs / kind secrets / .env.example"
 regexes = [
@@ -286,7 +325,7 @@ TOML
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.2  HADOLINT
+# 13.2  HADOLINT
 # ─────────────────────────────────────────────────────────────────────────────
 step_hadolint() {
     local failed=0
@@ -305,23 +344,46 @@ step_hadolint() {
             failed=$(( failed + 1 ))
         fi
     done < <(find "$REPO_DIR" -name "Dockerfile" \
-               -not -path "*/target/*" -not -path "*/.git/*")
+               -not -path "*/target/*" \
+               -not -path "*/node_modules/*" \
+               -not -path "*/security-reports/*" \
+               -not -path "*/.security-cache/*" \
+               -not -path "*/.git/*")
     [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.3  TRIVY CONFIG  (v3: extended to Kubernetes YAML)
+# 13.3  HELM LINT + RENDER
+# ─────────────────────────────────────────────────────────────────────────────
+step_helm() {
+    [[ -d "$HELM_CHART_DIR" ]] || { log_error "Helm chart not found: $HELM_CHART_DIR"; return 1; }
+    log_info "Linting Helm chart..."
+    helm lint "$HELM_CHART_DIR" || return 1
+    log_info "Rendering Helm chart for security scanners..."
+    helm template issue-tracker "$HELM_CHART_DIR" \
+        --namespace issue-app \
+        --set global.imagePullPolicy=Never > "$HELM_RENDERED"
+    [[ -s "$HELM_RENDERED" ]] || { log_error "Helm rendered an empty manifest"; return 1; }
+    log_ok "Rendered manifest: $HELM_RENDERED"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13.4  TRIVY CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 step_trivy_config() {
     local report="${REPORT_DIR}/trivy-config.json"
 
-    log_info "Trivy config scan — Dockerfiles + docker-compose.yml + Kubernetes YAML..."
+    log_info "Trivy config scan — Dockerfiles + Helm/Kubernetes configuration..."
     # --misconfiguration-scanners includes dockerfile AND kubernetes KSV rules
     if trivy config \
         --exit-code 1 \
         --severity  HIGH,CRITICAL \
         --format    json \
         --output    "$report" \
+        --skip-dirs "${REPO_DIR}/frontend-service/node_modules" \
+        --skip-dirs "${REPO_DIR}/security-reports" \
+        --skip-dirs "${REPO_DIR}/.security-cache" \
+        --skip-dirs "${REPO_DIR}/.verify" \
         "$REPO_DIR" 2>&1; then
         log_ok "No HIGH/CRITICAL misconfigurations"
     else
@@ -340,117 +402,81 @@ step_trivy_config() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.4  KUBESEC  (v3 NEW — uses public API for ARM64 compatibility)
+# 13.5  KUBESEC — local scan of rendered Deployment resources
 # ─────────────────────────────────────────────────────────────────────────────
 step_kubesec() {
     local report="${REPORT_DIR}/kubesec.json"
+    local manifest_dir="${REPORT_DIR}/kubesec-manifests"
     local failed=0 total=0
+    [[ -s "$HELM_RENDERED" ]] || { log_error "Rendered Helm manifest is missing; Helm step must pass first"; return 1; }
+    mkdir -p "$manifest_dir"
 
-    # Verify API is reachable
-    if ! curl -sf --max-time 5 "${KUBESEC_API}" \
-        -X POST -H "Content-Type: application/json" \
-        -d '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"t"}}' &>/dev/null; then
-        log_warn "kubesec API not reachable — skipping (offline environment?)"
-        return 0
-    fi
+    awk -v dir="$manifest_dir" '
+        BEGIN { n=1; out=sprintf("%s/doc-%03d.yaml", dir, n) }
+        /^---[[:space:]]*$/ { close(out); n++; out=sprintf("%s/doc-%03d.yaml", dir, n); next }
+        { print > out }
+    ' "$HELM_RENDERED"
 
-    log_info "Scoring Kubernetes Deployment manifests via kubesec API..."
     echo "[]" > "$report"
-
     while IFS= read -r manifest; do
-        local svc_name; svc_name=$(basename "$(dirname "$manifest")")
-        log_info "  Scanning $svc_name ($(basename "$manifest"))..."
-
-        local result
-        result=$(curl -sf --max-time 15 "${KUBESEC_API}" \
-            -X POST -H "Content-Type: application/json" \
-            --data-binary @"$manifest" 2>/dev/null || echo "[]")
-
-        local score
-        score=$(echo "$result" | jq -r '.[0].score // 0' 2>/dev/null || echo 0)
-        local message
-        message=$(echo "$result" | jq -r '.[0].message // "unknown"' 2>/dev/null)
-
+        grep -q '^kind: Deployment[[:space:]]*$' "$manifest" || continue
+        local result score name combined
+        result=$(podman run --rm --platform linux/amd64 \
+            -v "${manifest_dir}:/manifests:ro" \
+            "$KUBESEC_IMAGE" \
+            scan "/manifests/$(basename "$manifest")" 2>/dev/null) || result='[]'
+        score=$(printf '%s' "$result" | jq -r '.[0].score // -999')
+        name=$(printf '%s' "$result" | jq -r '.[0].object // "unknown"')
         total=$(( total + 1 ))
-
-        # Append to combined report
-        echo "$result" | jq --arg f "$manifest" '.[0] + {file: $f}' >> "${report}.tmp" 2>/dev/null || true
-
+        combined=$(jq -s '.[0] + [.[1][0]]' "$report" <(printf '%s' "$result"))
+        printf '%s\n' "$combined" > "$report"
         if [[ "$score" -ge "$KUBESEC_MIN_SCORE" ]]; then
-            log_ok "  $svc_name: score=$score — $message"
+            log_ok "$name: score=$score"
         else
-            log_warn "  $svc_name: score=$score (below min $KUBESEC_MIN_SCORE) — $message"
-            # Print critical deductions
-            echo "$result" | jq -r '.[0].scoring.critical[]? | "    [-\(.points)] \(.id): \(.reason)"' \
-                2>/dev/null | head -5 || true
+            log_error "$name: score=$score (minimum $KUBESEC_MIN_SCORE)"
             failed=$(( failed + 1 ))
         fi
-    done < <(find "$REPO_DIR/kubernetes/base/services" -name "deployment.yaml" \
-               -not -path "*/.git/*" 2>/dev/null)
+    done < <(find "$manifest_dir" -type f -name '*.yaml' | sort)
 
-    # Also scan kind-specific patches
-    if [[ -f "${REPO_DIR}/kubernetes/environments/kind/mysql/deployment.yaml" ]]; then
-        log_info "  Scanning mysql deployment..."
-        local result score
-        result=$(curl -sf --max-time 15 "${KUBESEC_API}" \
-            -X POST -H "Content-Type: application/json" \
-            --data-binary @"${REPO_DIR}/kubernetes/environments/kind/mysql/deployment.yaml" 2>/dev/null || echo "[]")
-        score=$(echo "$result" | jq -r '.[0].score // 0' 2>/dev/null || echo 0)
-        log_info "  mysql: score=$score"
-        total=$(( total + 1 ))
-    fi
-
-    log_info "$total manifest(s) scanned, $failed below threshold ($KUBESEC_MIN_SCORE)"
-    log_info "Tip: raise KUBESEC_MIN_SCORE after adding securityContext to manifests"
-
-    # kubesec is advisory for now — log failures but don't block pipeline
-    if [[ $failed -gt 0 ]]; then
-        log_warn "$failed manifest(s) scored below $KUBESEC_MIN_SCORE — see README §12.4 to harden"
-    fi
-    return 0   # non-blocking: hardening is incremental
+    [[ $total -gt 0 ]] || { log_error "No rendered Deployment manifests were scanned"; return 1; }
+    log_info "$total Deployment manifest(s) scanned; report: $report"
+    [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.5  KUBE-SCORE  (v3 NEW)
+# 13.6  KUBE-SCORE
 # ─────────────────────────────────────────────────────────────────────────────
 step_kube_score() {
     local report="${REPORT_DIR}/kube-score.txt"
 
-    log_info "Rendering kind overlay via kustomize..."
-    local rendered="${REPORT_DIR}/kind-rendered.yaml"
-    kubectl kustomize "${REPO_DIR}/kubernetes/environments/kind" \
-        --load-restrictor=LoadRestrictionsNone > "$rendered" 2>&1 || {
-        log_error "kustomize render failed — cannot run kube-score"
-        return 1
-    }
-
     log_info "Running kube-score on rendered manifests..."
     # --ignore-test: ImagePullPolicy=Never is intentional for local kind dev
-    kube-score score "$rendered" \
+    kube-score score "$HELM_RENDERED" \
         --output-format ci \
         --ignore-test container-image-pull-policy \
         2>&1 | tee "$report"
 
     local critical_count
-    critical_count=$(grep -c "^\[CRITICAL\]" "$report" 2>/dev/null || echo 0)
+    critical_count=$(grep -c "^\[CRITICAL\]" "$report" 2>/dev/null || true)
+    critical_count="${critical_count:-0}"
     local warning_count
-    warning_count=$(grep -c "^\[WARNING\]" "$report" 2>/dev/null || echo 0)
+    warning_count=$(grep -c "^\[WARNING\]" "$report" 2>/dev/null || true)
+    warning_count="${warning_count:-0}"
 
     log_info "CRITICAL: $critical_count  |  WARNING: $warning_count"
     log_info "Full report: $report"
 
     if [[ "$critical_count" -gt 0 ]]; then
-        log_warn "$critical_count CRITICAL finding(s) — see README §12.5 for recommended fixes"
-        log_warn "(non-blocking — add probes and securityContext to resolve)"
+        log_error "$critical_count CRITICAL finding(s) — see README §13.6 for recommended fixes"
+        return 1
     else
         log_ok "No CRITICAL kube-score findings"
     fi
-    # Non-blocking: kube-score improvements are tracked as tech debt
     return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.6a  CHECKSTYLE
+# 13.7  CHECKSTYLE
 # ─────────────────────────────────────────────────────────────────────────────
 step_checkstyle() {
     local cs_xml="${REPORT_DIR}/checkstyle.xml"
@@ -504,7 +530,7 @@ XML
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.6b  SEMGREP
+# 13.8  SEMGREP
 # ─────────────────────────────────────────────────────────────────────────────
 step_semgrep() {
     local out_java="${REPORT_DIR}/semgrep-java.json"
@@ -542,7 +568,7 @@ step_semgrep() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.6c  MAVEN BUILD
+# 13.9  MAVEN BUILD
 # ─────────────────────────────────────────────────────────────────────────────
 step_build() {
     local failed=0
@@ -560,40 +586,82 @@ step_build() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.6d  NVD CHECK
+# 13.10  NVD CHECK
 # ─────────────────────────────────────────────────────────────────────────────
 step_nvd() {
-    local plugin="org.owasp:dependency-check-maven:10.0.3:check"
+    local plugin="org.owasp:dependency-check-maven:${NVD_PLUGIN_VERSION}"
     local failed=0
+    local nvd_report_dir="${REPORT_DIR}/nvd"
+    mkdir -p "$NVD_DATA_DIR" "$nvd_report_dir"
+    chmod 0700 "$NVD_DATA_DIR"
+
     if [[ -z "$NVD_API_KEY" ]]; then
-        log_warn "NVD_API_KEY not set — first run downloads full NVD DB (~10-30 min)"
+        log_warn "NVD_API_KEY not set — NVD updates may be heavily rate-limited"
         log_warn "Set: export NVD_API_KEY=... (free key at nvd.nist.gov/developers/request-an-api-key)"
     fi
-    local opts="-DfailBuildOnCVSS=7 -DskipTestScope=true -Dformats=HTML,JSON"
-    [[ -n "$NVD_API_KEY" ]] && opts+=" -DnvdApiKey=${NVD_API_KEY}"
+
+    local update_args=(
+        "${plugin}:update-only"
+        "-DdataDirectory=${NVD_DATA_DIR}"
+        -DversionCheckEnabled=false
+        -B
+        --no-transfer-progress
+    )
+    if [[ -n "$NVD_API_KEY" ]]; then
+        export ODC_NVD_API_KEY="$NVD_API_KEY"
+        update_args+=("-DnvdApiKeyEnvironmentVariable=ODC_NVD_API_KEY")
+    fi
+
+    log_info "Incrementally updating shared NVD database: $NVD_DATA_DIR"
+    if mvnw auth-service "${update_args[@]}" 2>&1; then
+        date -u +'%Y-%m-%dT%H:%M:%SZ' > "${NVD_DATA_DIR}/last-successful-update.txt"
+        log_ok "NVD database update completed"
+    else
+        log_error "NVD database update failed; service scans were not run"
+        return 1
+    fi
+
     for svc in auth-service issue-service api-gateway; do
-        log_info "NVD scan: $svc..."
-        # shellcheck disable=SC2086
-        if mvnw "$svc" "$plugin" $opts -B --no-transfer-progress 2>&1; then
-            log_ok "$svc: no CVSS≥7 vulnerabilities"
+        local service_report_dir="${nvd_report_dir}/${svc}"
+        mkdir -p "$service_report_dir"
+        log_info "NVD scan from refreshed local database: $svc..."
+        if mvnw "$svc" "${plugin}:check" \
+            "-DdataDirectory=${NVD_DATA_DIR}" \
+            -DautoUpdate=false \
+            -DversionCheckEnabled=false \
+            -DskipTestScope=true \
+            "-DfailBuildOnCVSS=${NVD_FAIL_CVSS}" \
+            -Dformats=HTML,JSON \
+            "-Dodc.outputDirectory=${service_report_dir}" \
+            -B --no-transfer-progress 2>&1; then
+            log_ok "$svc: no CVSS≥${NVD_FAIL_CVSS} vulnerabilities"
         else
-            log_error "$svc: HIGH/CRITICAL CVEs — ${REPO_DIR}/${svc}/target/dependency-check-report.html"
+            log_error "$svc: scan failed or found CVSS≥${NVD_FAIL_CVSS} vulnerabilities — ${service_report_dir}"
             failed=$(( failed + 1 ))
         fi
     done
+
     if command -v npm &>/dev/null && [[ -d "${REPO_DIR}/frontend-service" ]]; then
         log_info "npm audit — frontend..."
         cd "${REPO_DIR}/frontend-service"
-        [[ ! -d node_modules ]] && npm install --silent 2>&1 | tail -3
-        if npm audit --audit-level=high 2>&1; then log_ok "frontend: npm audit clean"
-        else log_error "frontend: HIGH/CRITICAL npm CVEs"; failed=$(( failed + 1 )); fi
+        [[ -d node_modules ]] || npm ci --silent
+        local npm_report="${nvd_report_dir}/npm-audit.json"
+        if npm audit --audit-level=high --json > "$npm_report"; then
+            log_ok "frontend: npm audit clean"
+        else
+            local high critical
+            high=$(jq -r '.metadata.vulnerabilities.high // 0' "$npm_report" 2>/dev/null || echo 0)
+            critical=$(jq -r '.metadata.vulnerabilities.critical // 0' "$npm_report" 2>/dev/null || echo 0)
+            log_error "frontend: high=$high critical=$critical — $npm_report"
+            failed=$(( failed + 1 ))
+        fi
         cd - > /dev/null
     fi
     [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.6e  LINT  (ESLint + SpotBugs)
+# 13.11  LINT  (ESLint + SpotBugs)
 # ─────────────────────────────────────────────────────────────────────────────
 step_lint() {
     local failed=0
@@ -622,7 +690,7 @@ step_lint() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.7a  PODMAN BUILD
+# 13.12  PODMAN BUILD
 # ─────────────────────────────────────────────────────────────────────────────
 step_podman_build() {
     log_info "Building container images with Podman (localhost/ prefix)..."
@@ -642,10 +710,18 @@ step_podman_build() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.7b  TRIVY IMAGE SCAN
+# 13.13  TRIVY IMAGE SCAN
 # ─────────────────────────────────────────────────────────────────────────────
 step_trivy_image() {
     local failed=0
+    local podman_socket=""
+    podman_socket=$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' \
+        2>/dev/null | head -1 || true)
+    if [[ -z "$podman_socket" || ! -S "$podman_socket" ]]; then
+        podman_socket=$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null \
+            | sed 's#^unix://##' || true)
+    fi
+
     for img in "${IMAGES[@]}"; do
         local svc_name; svc_name="${img##*/}"; svc_name="${svc_name%%:*}"
         local img_report="${REPORT_DIR}/trivy-image-${svc_name}.json"
@@ -655,98 +731,102 @@ step_trivy_image() {
             continue
         fi
         log_info "Scanning image: $img..."
-        if trivy image \
-            --exit-code 1 \
-            --severity  HIGH,CRITICAL \
-            --format    json \
-            --output    "$img_report" \
-            "$img" 2>&1; then
-            log_ok "$svc_name: no HIGH/CRITICAL CVEs"
+        local scan_rc=0 archive=""
+        if [[ -n "$podman_socket" && -S "$podman_socket" ]]; then
+            trivy image \
+                --image-src podman \
+                --podman-host "$podman_socket" \
+                --scanners vuln \
+                --exit-code 1 \
+                --severity HIGH,CRITICAL \
+                --format json \
+                --output "$img_report" \
+                "$img" 2>&1 || scan_rc=$?
         else
+            archive=$(mktemp -t "trivy-${svc_name}") || return 1
+            if podman save --format docker-archive -o "$archive" "$img" 2>&1; then
+                trivy image \
+                    --scanners vuln \
+                    --exit-code 1 \
+                    --severity HIGH,CRITICAL \
+                    --format json \
+                    --output "$img_report" \
+                    --input "$archive" 2>&1 || scan_rc=$?
+            else
+                scan_rc=2
+            fi
+        fi
+
+        if [[ $scan_rc -eq 0 ]]; then
+            log_ok "$svc_name: no HIGH/CRITICAL CVEs"
+        elif jq -e '.Results | type == "array"' "$img_report" &>/dev/null; then
             local n; n=$(jq '[.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH" or .Severity=="CRITICAL")]|length' \
                 "$img_report" 2>/dev/null || echo "?")
             log_error "$svc_name: $n HIGH/CRITICAL CVE(s) — $img_report"
             jq -r '.Results[]?.Vulnerabilities[]?|select(.Severity=="HIGH" or .Severity=="CRITICAL")|"    \(.Severity)  \(.VulnerabilityID)  \(.PkgName) \(.InstalledVersion) → \(.FixedVersion//"no fix")"' \
                 "$img_report" 2>/dev/null | sort -u | head -5 || true
             failed=$(( failed + 1 ))
+        else
+            log_error "$svc_name: Trivy could not read or analyse the Podman image"
+            failed=$(( failed + 1 ))
         fi
+        [[ -n "$archive" ]] && rm -f "$archive"
     done
     [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.8a  SONARQUBE
+# 13.14  SONAR
 # ─────────────────────────────────────────────────────────────────────────────
 step_sonar() {
-    local free_mb; free_mb=$(vm_stat 2>/dev/null | awk '/Pages free/{print int($3)*4096/1048576}' || echo 9999)
-    if [[ $free_mb -lt 1500 ]]; then
-        log_error "Only ~${free_mb}MB free RAM — SonarQube needs ~1.5GB. Use --skip-sonar."; return 1
+    [[ -n "$SONAR_TOKEN" ]] || { log_error "SONAR_TOKEN is required for $SONAR_MODE mode"; return 1; }
+    [[ -n "$SONAR_PROJECT_KEY_PREFIX" ]] || { log_error "SONAR_PROJECT_KEY_PREFIX is required"; return 1; }
+    if [[ "$SONAR_MODE" == "cloud" && -z "$SONAR_ORGANIZATION" ]]; then
+        log_error "SONAR_ORGANIZATION is required for cloud mode"; return 1
     fi
-    podman machine ssh "sudo sysctl -w vm.max_map_count=262144" 2>/dev/null || true
-    if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^sonarqube$"; then
-        log_info "Starting SonarQube container..."
-        podman run -d --name sonarqube --memory 2g --restart unless-stopped \
-            -p 9000:9000 -v sonarqube_data:/opt/sonarqube/data sonarqube:community 2>&1
-    else
-        log_info "SonarQube already running"
-    fi
-    log_info "Waiting for SonarQube (up to 5 min)..."
-    local waited=0
-    until curl -sf "${SONAR_HOST}/api/system/status" 2>/dev/null | grep -q '"status":"UP"'; do
-        sleep 5; waited=$(( waited + 5 ))
-        [[ $waited -ge 300 ]] && { log_error "SonarQube not ready after 300s"; return 1; }
-        printf "."
-    done; echo ""
-    log_ok "SonarQube UP at ${SONAR_HOST}"
 
-    curl -sf -u admin:admin -X POST "${SONAR_HOST}/api/users/change_password" \
-        -d "login=admin&previousPassword=admin&password=${SONAR_ADMIN_PASS}" &>/dev/null || true
+    export SONAR_TOKEN
+    log_info "Using ${SONAR_MODE} analysis at ${SONAR_HOST_URL}; credentials remain in process environment"
 
-    if [[ -z "$SONAR_TOKEN" ]]; then
-        curl -sf -u "admin:${SONAR_ADMIN_PASS}" -X POST "${SONAR_HOST}/api/user_tokens/revoke" \
-            -d "login=admin&name=pipeline-v3-token" &>/dev/null || true
-        SONAR_TOKEN=$(curl -sf -u "admin:${SONAR_ADMIN_PASS}" \
-            -X POST "${SONAR_HOST}/api/user_tokens/generate" \
-            -d "login=admin&name=pipeline-v3-token&type=GLOBAL_ANALYSIS_TOKEN" \
-            | jq -r '.token' 2>/dev/null || echo "")
-    fi
-    [[ -z "$SONAR_TOKEN" ]] && { log_error "Failed to get SonarQube token"; return 1; }
-    echo "$SONAR_TOKEN" > "${REPORT_DIR}/sonar-token.txt"
-    log_ok "Token acquired"
-
-    local failed=0
-    for svc in auth-service issue-service api-gateway; do
-        local key="${SONAR_PROJECT_KEY}-${svc}"
-        curl -sf -u "admin:${SONAR_ADMIN_PASS}" -X POST "${SONAR_HOST}/api/projects/create" \
-            -d "project=${key}&name=Issue+Tracker+v3+-+${svc}" &>/dev/null || true
-        log_info "Analysing $svc..."
-        if mvnw "$svc" "org.sonarsource.scanner.maven:sonar-maven-plugin:sonar" \
-            -Dsonar.host.url="$SONAR_HOST" -Dsonar.token="$SONAR_TOKEN" \
-            -Dsonar.projectKey="$key" -B --no-transfer-progress 2>&1; then
+    local failed=0 svc key
+    for svc in auth-service issue-service api-gateway frontend-service; do
+        key=$(sonar_project_key "$svc")
+        local sonar_args=("-Dsonar.host.url=${SONAR_HOST_URL}" "-Dsonar.projectKey=${key}")
+        [[ -n "$SONAR_ORGANIZATION" ]] && sonar_args+=("-Dsonar.organization=${SONAR_ORGANIZATION}")
+        [[ -n "$SONAR_REGION" ]] && sonar_args+=("-Dsonar.region=${SONAR_REGION}")
+        log_info "Analysing ${svc} as ${key}..."
+        if [[ "$svc" == "frontend-service" ]]; then
+            sonar_args+=("-Dsonar.sources=src" "-Dsonar.exclusions=build/**,node_modules/**,.scannerwork/**")
+            if (cd "${REPO_DIR}/frontend-service" && npx --yes @sonar/scan@4.3.5 "${sonar_args[@]}" 2>&1); then
+                log_ok "$svc: submitted"
+            else
+                log_error "$svc: analysis failed"; failed=$(( failed + 1 ))
+            fi
+        elif mvnw "$svc" "org.sonarsource.scanner.maven:sonar-maven-plugin:sonar" \
+            "${sonar_args[@]}" -B --no-transfer-progress 2>&1; then
             log_ok "$svc: submitted"
         else
             log_error "$svc: analysis failed"; failed=$(( failed + 1 ))
         fi
     done
-    log_info "UI: ${SONAR_HOST}  login: admin / ${SONAR_ADMIN_PASS}"
+    log_info "Dashboard: ${SONAR_HOST_URL}/projects"
     [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.8b  QUALITY GATE
+# 13.15  QUALITY GATE
 # ─────────────────────────────────────────────────────────────────────────────
 step_gate() {
-    [[ -z "$SONAR_TOKEN" && -f "${REPORT_DIR}/sonar-token.txt" ]] \
-        && SONAR_TOKEN=$(cat "${REPORT_DIR}/sonar-token.txt")
-    [[ -z "$SONAR_TOKEN" ]] && { log_error "No SonarQube token — did step 12.8a pass?"; return 1; }
+    [[ -n "$SONAR_TOKEN" ]] || { log_error "No Sonar token — did the analysis step pass?"; return 1; }
     local failed=0
-    for svc in auth-service issue-service api-gateway; do
-        local key="${SONAR_PROJECT_KEY}-${svc}"
+    for svc in auth-service issue-service api-gateway frontend-service; do
+        local key
+        key=$(sonar_project_key "$svc")
         log_info "Quality Gate: $svc..."
         local attempts=0 status=""
         while [[ $attempts -lt 36 ]]; do
-            status=$(curl -sf -u "${SONAR_TOKEN}:" \
-                "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${key}" \
+            status=$(printf 'Authorization: Bearer %s\n' "$SONAR_TOKEN" | curl -sf -H @- \
+                "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${key}" \
                 | jq -r '.projectStatus.status' 2>/dev/null || echo "")
             [[ "$status" =~ ^(OK|ERROR|WARN|NONE)$ ]] && break
             sleep 5; attempts=$(( attempts + 1 )); printf "."
@@ -754,27 +834,28 @@ step_gate() {
         case "$status" in
             OK)    log_ok   "$svc: Gate PASSED" ;;
             ERROR) log_error "$svc: Gate FAILED"
-                   curl -sf -u "${SONAR_TOKEN}:" \
-                       "${SONAR_HOST}/api/qualitygates/project_status?projectKey=${key}" \
+                   printf 'Authorization: Bearer %s\n' "$SONAR_TOKEN" | curl -sf -H @- \
+                       "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${key}" \
                        | jq -r '.projectStatus.conditions[]|select(.status=="ERROR")|"    \(.metricKey): \(.actualValue) (threshold: \(.errorThreshold))"' \
                        2>/dev/null || true
                    failed=$(( failed + 1 )) ;;
             WARN)  log_warn "$svc: warnings (not blocking)" ;;
-            *)     log_warn "$svc: result unavailable" ;;
+            NONE)  log_error "$svc: no quality gate assigned"; failed=$(( failed + 1 )) ;;
+            *)     log_error "$svc: quality gate result unavailable"; failed=$(( failed + 1 )) ;;
         esac
     done
-    log_info "Dashboard: ${SONAR_HOST}/projects"
+    log_info "Dashboard: ${SONAR_HOST_URL}/projects"
     [[ $failed -eq 0 ]]
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12.9  DAST  (ZAP against the running kind cluster)
+# 13.16  DAST  (ZAP against the running Kind cluster)
 # ─────────────────────────────────────────────────────────────────────────────
 step_dast() {
     log_info "Checking kind cluster at ${APP_URL}..."
-    if ! curl -sf --max-time 10 "${APP_URL}/" &>/dev/null; then
+    if ! curl -ksf --max-time 10 "${APP_URL}/" &>/dev/null; then
         log_error "App not reachable at ${APP_URL}"
-        log_error "Deploy the kind cluster first: ./scripts/kind-deploy.sh"
+        log_error "Deploy or check it first: ./scripts/helm-deploy.sh check"
         return 1
     fi
     log_ok "Cluster is reachable"
@@ -782,14 +863,24 @@ step_dast() {
     local html="${REPORT_DIR}/zap-report.html" json="${REPORT_DIR}/zap-report.json"
     log_info "ZAP baseline scan (passive) — target: ${APP_URL}"
 
+    local app_host
+    app_host=$(printf '%s' "$APP_URL" | sed -E 's#^[a-zA-Z]+://([^/:]+).*#\1#')
+
+    local kind_node_ip
+    kind_node_ip=$(podman inspect issue-app-control-plane \
+        --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}' 2>/dev/null)
+    [[ -n "$kind_node_ip" ]] || { log_error "Could not resolve the Kind control-plane IP"; return 1; }
+
     if podman run --rm \
-        --network host \
+        --network kind \
+        --add-host "${app_host}:${kind_node_ip}" \
         -v "${REPORT_DIR}:/zap/wrk:rw" \
         ghcr.io/zaproxy/zaproxy:stable \
         zap-baseline.py \
             -t "${APP_URL}/" \
             -r "zap-report.html" \
             -J "zap-report.json" \
+            -z "-config connection.ssl.acceptAll=true" \
             -l WARN -I 2>&1; then
         log_ok "ZAP scan complete — ${html}"
     else
@@ -811,7 +902,7 @@ print_summary() {
 
     echo ""
     echo -e "${BOLD}${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${BLUE}║    SECURITY & CODE QUALITY PIPELINE — v3 SUMMARY           ║${NC}"
+    echo -e "${BOLD}${BLUE}║    SECURITY & CODE QUALITY PIPELINE — v4 SUMMARY           ║${NC}"
     echo -e "${BOLD}${BLUE}╠════════════════════════════════════════════════════════════╣${NC}"
 
     for i in "${!STEP_IDS[@]}"; do
@@ -829,8 +920,13 @@ print_summary() {
 
     echo -e "${BOLD}${BLUE}╠════════════════════════════════════════════════════════════╣${NC}"
     local vmsg vcolor
-    if [[ $fail -eq 0 ]]; then vcolor=$GREEN; vmsg="ALL CHECKS PASSED — safe to merge/deploy"
-    else vcolor=$RED; vmsg="${fail} CHECK(S) FAILED — do not merge/deploy"; fi
+    if [[ $fail -gt 0 ]]; then
+        vcolor=$RED; vmsg="${fail} CHECK(S) FAILED — do not merge/deploy"
+    elif [[ $skip -gt 0 ]]; then
+        vcolor=$YELLOW; vmsg="PARTIAL SCAN — ${skip} CHECK(S) SKIPPED"
+    else
+        vcolor=$GREEN; vmsg="ALL CHECKS PASSED — safe to merge/deploy"
+    fi
     printf "${BOLD}${BLUE}║${NC}  ${vcolor}${BOLD}%-58s${NC}  ${BOLD}${BLUE}║${NC}\n" "$vmsg"
     printf "${BOLD}${BLUE}║${NC}  ${DIM}%-58s${NC}  ${BOLD}${BLUE}║${NC}\n" "Pass:$pass  Fail:$fail  Skip:$skip  Total:${total}s"
     printf "${BOLD}${BLUE}║${NC}  ${DIM}%-58s${NC}  ${BOLD}${BLUE}║${NC}\n" "Reports: $REPORT_DIR"
@@ -851,10 +947,11 @@ print_summary() {
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
-    log_banner "Security & Code Quality Pipeline — Issue Tracker v3 (Kind)"
+    log_banner "Security & Code Quality Pipeline — Issue Tracker v4 (Helm + Kind)"
     echo -e "  ${DIM}Repository : ${REPO_DIR}${NC}"
     echo -e "  ${DIM}App URL    : ${APP_URL}${NC}"
     echo -e "  ${DIM}Started    : $(date)${NC}"
+    [[ "$SKIP_NVD"   == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  NVD + npm audit: SKIPPED"
     [[ "$SKIP_SONAR" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  SonarQube + Quality Gate: SKIPPED"
     [[ "$SKIP_DAST"  == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  DAST: SKIPPED"
     [[ "$SKIP_BUILD" == "true" ]] && echo -e "  ${YELLOW}⚠${NC}  Maven Build + Podman Build: SKIPPED"
@@ -866,16 +963,21 @@ main() {
     # ── Source + K8s checks (no build needed) ──────────────────────────────
     run_step "gitleaks"
     run_step "hadolint"
+    run_step "helm"
     run_step "trivy_config"
-    run_step "kubesec"
-    run_step "kube_score"
+    if [[ "$(get_status helm)" == "PASS" ]]; then
+        run_step "kubesec"
+        run_step "kube_score"
+    else
+        skip_step "kubesec" "Helm render failed"
+        skip_step "kube_score" "Helm render failed"
+    fi
     run_step "checkstyle"
     run_step "semgrep"
 
     # ── Build-dependent steps ───────────────────────────────────────────────
     if [[ "$SKIP_BUILD" == "true" ]]; then
         skip_step "build"        "--skip-build flag"
-        skip_step "nvd"          "--skip-build flag"
         skip_step "lint"         "--skip-build flag"
         skip_step "podman_build" "--skip-build flag"
         skip_step "trivy_image"  "--skip-build flag"
@@ -885,14 +987,26 @@ main() {
         local build_ok=false
         [[ "$(get_status build)" == "PASS" ]] && build_ok=true
 
-        $build_ok && run_step "nvd"          || skip_step "nvd"          "Maven Build failed"
-        $build_ok && run_step "lint"         || skip_step "lint"         "Maven Build failed"
-        $build_ok && run_step "podman_build" || skip_step "podman_build" "Maven Build failed"
+        if $build_ok; then
+            run_step "lint"
+            run_step "podman_build"
+        else
+            skip_step "lint" "Maven Build failed"
+            skip_step "podman_build" "Maven Build failed"
+        fi
 
         local images_ok=false
         [[ "$(get_status podman_build)" == "PASS" ]] && images_ok=true
-        $images_ok && run_step "trivy_image" || skip_step "trivy_image"  "Podman Build failed"
+        if $images_ok; then
+            run_step "trivy_image"
+        else
+            skip_step "trivy_image" "Podman Build failed"
+        fi
     fi
+
+    # Dependency-Check uses the persistent local database and can scan directly
+    # from pom.xml even when Maven and Podman builds are skipped.
+    [[ "$SKIP_NVD" == "true" ]] && skip_step "nvd" "--skip-nvd flag" || run_step "nvd"
 
     # ── SonarQube ───────────────────────────────────────────────────────────
     if [[ "$SKIP_SONAR" == "true" ]]; then
@@ -903,7 +1017,11 @@ main() {
         [[ "$(get_status build)" == "PASS" || "$SKIP_BUILD" == "true" ]] && build_ok=true
         if $build_ok; then
             run_step "sonar"
-            [[ "$(get_status sonar)" == "PASS" ]] && run_step "gate" || skip_step "gate" "SonarQube failed"
+            if [[ "$(get_status sonar)" == "PASS" ]]; then
+                run_step "gate"
+            else
+                skip_step "gate" "Sonar analysis failed"
+            fi
         else
             skip_step "sonar" "Maven Build failed"
             skip_step "gate"  "Maven Build failed"
