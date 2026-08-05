@@ -78,7 +78,16 @@ ok "Podman machine is running."
 # ── 1. Create kind cluster (using Podman as the container runtime) ────────────
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
-if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+control_plane_container="${CLUSTER_NAME}-control-plane"
+existing_cluster_label=$(podman inspect "$control_plane_container" \
+  --format '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' 2>/dev/null || true)
+
+if [[ "$existing_cluster_label" == "$CLUSTER_NAME" ]]; then
+  if [[ $(podman inspect "$control_plane_container" \
+    --format '{{.State.Running}}' 2>/dev/null || true) != "true" ]]; then
+    info "Starting existing kind control-plane container '$control_plane_container'..."
+    podman start "$control_plane_container" >/dev/null
+  fi
   info "kind cluster '$CLUSTER_NAME' already exists — skipping creation."
 else
   if command -v lsof &>/dev/null && lsof -nP -iTCP:80 -sTCP:LISTEN | grep -q .; then
@@ -91,7 +100,6 @@ else
 fi
 
 # Kind port mappings are fixed when the control-plane container is created.
-control_plane_container="${CLUSTER_NAME}-control-plane"
 port_mapping=$(podman port "$control_plane_container" 80/tcp 2>/dev/null || true)
 if ! grep -Eq ':80$' <<< "$port_mapping"; then
   die "Cluster '$CLUSTER_NAME' was not created with host port 80. Run './scripts/kind-deploy.sh teardown' and deploy again."
@@ -139,6 +147,10 @@ ok "All images loaded into kind."
 # files outside the kustomization root (../../base/...).
 # Workaround: build with --load-restrictor=LoadRestrictionsNone then apply.
 info "Applying Kubernetes manifests (Kustomize)..."
+# The compatibility apply below targets the issue-app namespace before the full
+# overlay is applied. Ensure the namespace exists on fresh clusters; applying the
+# same declarative manifest again through Kustomize is safe and idempotent.
+kubectl apply -f "kubernetes/base/infrastructure/namespace.yaml"
 # Apply the frontend Ingress first when upgrading an older combined Ingress.
 # This releases its /api path before the admission webhook validates the new,
 # separate API Ingress.
